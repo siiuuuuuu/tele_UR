@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-#bash convert_data.sh
 
-# Edit these settings before converting regular teleoperation data.
-demo_dir="${HOME}/dp_data/new_task1_expertdata"
+# Edit these settings before merging and converting data with
+# success/intervention metadata.
+demo_dirs=(
+  "${HOME}/dp_data/task1_expertdata"
+  "${HOME}/dp_data/task1_rollout"
+)
 # This directory is overwritten if it already exists.
-save_dir="${HOME}/dp_data/zarr_task1"
+save_dir="${HOME}/dp_data/task1_Recap_iter2"
 # Use 1 to include an observation type in Zarr, or 0 to skip it.
 save_img="1"
 save_wrist_img="1"
 save_depth="0"
 save_cloud="0"
 
-python convert_demos.py \
-  --demo_dir "${demo_dir}" \
+python convert_demos_rollout.py \
+  --demo_dirs "${demo_dirs[@]}" \
   --save_dir "${save_dir}" \
   --save_img "${save_img}" \
   --save_wrist_img "${save_wrist_img}" \

@@ -53,14 +53,14 @@ PY
 
 ![Hardware installation and alignment](docs/assets/hardware-installation.png)
 
-As shown above, align the hand so that the palm normal points along the negative y-axis, with the palm facing the small cylinder.
+As shown above, install the Inspire dexterous hand so that its palm normal points along the negative y-axis.
 
 Before collecting data, make sure the following hardware and services are ready:
 
 - UR5 robot: the code connects to `192.168.3.6` by default. Configure this in the `UR_HOST` constant in `servoL.py` and `traj_valid.py`. If jitter is severe, reduce speed to 50%.
-- UR controller: Remote Control/RTDE must be enabled, and the computer must be on the same network as the robot.
+- UR controller: Connect the computer to the robot controller with an Ethernet cable, either directly or through a LAN switch. Configure both devices on the same IP subnet, and enable Remote Control/RTDE on the robot.
 - Inspire hand: default serial port is `/dev/ttyUSB0`, baud rate `115200`.
-- RealSense cameras: two cameras are used by default, with `front_cam_idx=0` and `right_cam_idx=1`. Device serial numbers are sorted before indexing.
+- RealSense cameras: First install the [Intel RealSense SDK (librealsense)](https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md), including its udev rules. Then connect the two cameras; the code uses `front_cam_idx=0` and `right_cam_idx=1` by default, with device serial numbers sorted before indexing.
 - SteamVR: Set up the Vive Tracker following [Software Setup Tutorial - VIVE Tracker setup](https://docs.google.com/document/d/1ANxSA_PctkqFf3xqAkyktgBgDWEbrFK7b1OnJe54ltw/edit?tab=t.0#heading=h.yxlxo67jgfyx).
 - MANUS glove: First follow the [ManusTele repository](https://github.com/siiuuuuuu/ManusTele) to configure and start the MANUS client. Then connect the client to `localhost:8888`, where `SM_inspire_manus_process.py` listens by default, and stream the glove data.
 
@@ -68,12 +68,6 @@ Set temporary serial permission:
 
 ```bash
 sudo chmod 666 /dev/ttyUSB0
-```
-
-For a persistent setup, add the current user to the `dialout` group, then log out and log back in:
-
-```bash
-sudo usermod -aG dialout $USER
 ```
 
 If RealSense devices cannot be enumerated, install librealsense/udev rules first, then reconnect the cameras.
@@ -86,24 +80,7 @@ After the UR robot, RealSense cameras, SteamVR, MANUS client, and Inspire hand a
 conda activate tele
 ```
 
-Example with explicit robot and safety parameters:
-
-```bash
-python servoL.py \
-  --demo_dir ~/dp_data/new_task1_expertdata \
-  --ur_host 192.168.3.6 \
-  --workspace_x -1.0 1.0 \
-  --workspace_y -1.0 1.0 \
-  --workspace_z 0.0 1.0 \
-  --initial_pose 0.248 0.1212 0.3978 1.16 1.25 1.28 \
-  --dt 0.04 \
-  --max_length 1000 \
-  --hand_port /dev/ttyUSB0 \
-  --hand_baudrate 115200 \
-  --use_wrist_img true
-```
-
-You can also use the helper script:
+Edit the robot address, workspace limits, initial pose, output directory, hand serial port, and other collection settings at the top of `collect_data.sh`. Then run:
 
 ```bash
 bash collect_data.sh
@@ -131,47 +108,29 @@ HDF5 fields:
 
 ## 5. Convert HDF5 to Zarr
 
-Convert regular teleoperation data:
-
-```bash
-conda activate tele
-
-python convert_demos.py \
-  --demo_dir ~/dp_data/new_task1_expertdata \
-  --save_dir ~/dp_data/zarr_task1 \
-  --save_img 1 \
-  --save_wrist_img 1 \
-  --save_depth 0 \
-  --save_cloud 0
-```
-
-Or edit the paths in `convert_data.sh` and run:
+For regular teleoperation data, edit the input directory, output directory, and saved observation types at the top of `convert_data.sh`. Then run:
 
 ```bash
 bash convert_data.sh
 ```
 
-For data with `success` / `intervention` metadata, or when merging multiple directories:
+For data with `success` / `intervention` metadata, or when merging multiple directories, edit the directory list and output settings at the top of `convert_rollout_data.sh`. Then run:
 
 ```bash
-python convert_demos_rollout.py \
-  --demo_dirs ~/dp_data/task1_expertdata ~/dp_data/task1_rollout \
-  --save_dir ~/dp_data/task1_Recap_iter2 \
-  --save_img 1 \
-  --save_wrist_img 1
+bash convert_rollout_data.sh
 ```
 
 Note: the conversion scripts overwrite `save_dir` if it already exists.
 
 ## 6. Inspect Data and Replay Trajectories
 
-Play the synchronized `color` and `wrist_color` camera streams:
+Play the `color` and `wrist_color` camera streams:
 
 ```bash
 python read.py ~/dp_data/new_task1_expertdata
 ```
 
-Play rollout data with synchronized cameras and `intervention` / `success` status overlays:
+Play rollout data with cameras and `intervention` / `success` status overlays:
 
 ```bash
 python read_with_intervention.py ~/dp_data/offlineRL_data/new_task1_iter1
@@ -204,21 +163,28 @@ python fix_h5_success.py /home/lrz/dp_data/offlineRL_data/task1/demo_20260507_11
 python fix_h5_success.py /home/lrz/dp_data/offlineRL_data/task1/demo_20260507_114630.h5 true
 ```
 
-Replay one trajectory on the UR robot and Inspire hand:
+To replay one trajectory on the UR robot and Inspire hand, edit the trajectory path and hardware settings at the top of `replay_trajectory.sh`. Keep them consistent with the settings used during collection, then run:
 
 ```bash
-python traj_valid.py \
-  --data_file ~/dp_data/new_task1_expertdata/demo_YYYYMMDD_HHMMSS.h5 \
-  --ur_host 192.168.3.6 \
-  --workspace_x -1.0 1.0 \
-  --workspace_y -1.0 1.0 \
-  --workspace_z 0.0 1.0 \
-  --initial_pose 0.248 0.1212 0.3978 1.16 1.25 1.28 \
-  --dt 0.04 \
-  --hand_port /dev/ttyUSB0 \
-  --hand_baudrate 115200 \
-  --speed 1.0 \
-  -y
+bash replay_trajectory.sh
 ```
 
-Use the same UR host, workspace, initial pose, control period, and hand serial port used during collection. Replay sends real commands to the robot and hand. Before running it, verify the workspace, emergency stop, initial pose, and surrounding environment. The script rejects trajectories whose first recorded target is more than `0.10 m` from the configured initial pose unless `--max_initial_distance` is changed explicitly.
+Replay sends real commands to the robot and hand and asks for confirmation before starting. Verify the workspace, emergency stop, initial pose, and surrounding environment. The script rejects trajectories whose first recorded target exceeds the configured `max_initial_distance`.
+
+## BibTeX
+
+Please consider citing our work if you find this repository useful:
+
+```bibtex
+@article{TODO_CITATION_KEY,
+  title   = {TODO_TITLE},
+  author  = {TODO_AUTHORS},
+  journal = {TODO_VENUE},
+  year    = {TODO_YEAR}
+}
+```
+
+## Acknowledgement
+
+We thank the authors of [iDP3 / Humanoid-Teleoperation](https://github.com/YanjieZe/Humanoid-Teleoperation) for their open-source work, which provided valuable reference and inspiration for this project.
+
