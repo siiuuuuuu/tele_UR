@@ -20,24 +20,61 @@ from datetime import datetime
 from SM_inspire_manus_process import inspire_Manus
 from teleop_interfaces import InspireHandController, URArmInterface
 from tracker_pose_processor import TrackerPoseProcessor
-# RTDE connection configuration
-#UR_HOST = "192.168.1.178"  # UR5 robot IP address
-UR_HOST = "192.168.3.6" #210
+
+DEFAULT_UR_HOST = "192.168.3.6" 
+DEFAULT_WORKSPACE_X = [-1.5, 1.5]
+DEFAULT_WORKSPACE_Y = [-1.5, 1.5]
+DEFAULT_WORKSPACE_Z = [-0.5, 1.5]
+DEFAULT_INITIAL_POSE = [0.248, 0.1212, 0.3978, 1.16, 1.25, 1.28]
+DEFAULT_DT = 1.0 / 25.0
+DEFAULT_MAX_LENGTH = 1000
+DEFAULT_HAND_PORT = "/dev/ttyUSB0"
+DEFAULT_HAND_BAUDRATE = 115200
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in ("true", "1", "yes", "y"):
+        return True
+    if value in ("false", "0", "no", "n"):
+        return False
+    raise argparse.ArgumentTypeError("expected a boolean value")
+
+
+def positive_float(value):
+    value = float(value)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("expected a positive float")
+    return value
+
+
+def positive_int(value):
+    value = int(value)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return value
+
+
+def validate_workspace_limit(axis, limit):
+    if limit[0] > limit[1]:
+        raise ValueError(f"workspace_{axis} lower bound must be <= upper bound")
+    return limit
 
 def main(args):
     # Workspace safety limits (meters)
     workspace_limits = {
-        'x': [-1, 1.],
-        'y': [-1, 1], 
-        'z': [0, 1]
+        'x': validate_workspace_limit("x", args.workspace_x),
+        'y': validate_workspace_limit("y", args.workspace_y),
+        'z': validate_workspace_limit("z", args.workspace_z),
     }
-    dt = 1.0/25               # 控制频率 (25Hz)
+    dt = args.dt              
     tool=MATHTOOLS()
-    max_length=1600
+    max_length=args.max_length
     # Initialize RTDE connection
     try:
         robot=URArmInterface(
-            UR_HOST,
+            args.ur_host,
             workspace_limits,
             servo_speed=0.005,
             servo_acceleration=0.005,
@@ -50,61 +87,55 @@ def main(args):
         sys.exit(1)
     #init data saving  
     data_dir = args.demo_dir
-    #demo_name = args.demo_name
     use_wrist_img=args.use_wrist_img
     os.makedirs(data_dir, exist_ok=True)
-    #record_file_name = os.path.join(data_dir, demo_name+".h5")
 
     #initialize inspire_Manus
     hand_Manus=inspire_Manus(use_right_hand=True, use_left_hand=False)
-    hand_controller=InspireHandController("/dev/ttyUSB0", 115200)
+    hand_controller=InspireHandController(args.hand_port, args.hand_baudrate)
 
     # initialize realsense
     cam_context=MultiRealSense(use_right_cam=use_wrist_img, front_num_points=20000, 
                          use_grid_sampling=True, use_crop=False,img_size=256)
 
-    hand_Manus.start()#开启manus进程
-    cam_context.start()#开启相机进程
+    hand_Manus.start()
+    cam_context.start()
 
     current_pose = robot.get_tcp_pose()
     print(current_pose)
-    initial_pose =[0.248,0.1212,0.3978,1.16,1.25,1.28]
-    #initial_pose =[0.248,0.0812,0.3978,1.16,1.25,1.28]
-    # initial_pose = current_pose
+    initial_pose = args.initial_pose
     print("Moving to initial position")
     robot.move_l(initial_pose, 0.3, 0.3)
     tracker_processor = TrackerPoseProcessor(tool, initial_pose)
 
-    # 初始化 OpenVR
+    # Initialize OpenVR
     print("Initializing OpenVR")
     v = triad_openvr.triad_openvr()
     v.print_discovered_objects()
 
     print("\n" + "="*50)
-    print("请按下 'a' 键 结束数据采集循环...")
-    print("按下 's' 键开始录制，再次按下 's' 键结束录制")
+    print("Press 'a' to stop the data collection loop...")
+    print("Press 's' to start recording; press 's' again to stop recording")
     print("="*50 + "\n")
     #time.sleep(1)
     keyboard_control = KeyboardControl()
-    keyboard_control.start()#开启监听线程
+    keyboard_control.start()# Start listener thread
     time.sleep(0.1)
 
     try:
         while not keyboard_control.should_stop_collection():
 
-            # 等待按键或超时，等环境重置和人手对齐就绪
+            # Wait for recording while the environment is reset and the operator's hand is aligned.
             keyboard_control.wait_recording()
             episode = EpisodeBuffer(use_wrist_img=use_wrist_img)
             tracker_processor.clear_reference()
-            #time.sleep(1)
-
             print(f"Control frequency set to: {1/dt:.2f} Hz\r")
             print("Starting recording tele-operation...\r")
-            print("录制已开始，按下 's' 键结束录制\r")    
+            print("Recording started. Press 's' to stop recording.\r")    
             step = 0
-            while step < max_length and keyboard_control.is_recording():#遥操作主循环，按s键结束
+            while step < max_length and keyboard_control.is_recording():
                 start_time = time.time()
-                # 检查机器人状态
+                # Check robot status
                 if robot.is_ready():
                     current_tracker_mat = tracker_processor.read_tracker_mat(v.devices["tracker_1"])
                     if current_tracker_mat is None:
@@ -116,40 +147,38 @@ def main(args):
                         current_pose = robot.get_tcp_pose()
                         robot.servo(current_pose)
                         continue
-                    robot_obs=robot.get_obs()#获取当前状态
+                    robot_obs=robot.get_obs()
                     if robot_obs is None:
                         time.sleep(0.01)
                         continue
-                    #用于给相对位姿计算为xyz+rotvec 6维 robot state格式前6维为关节位姿，后6维为TCP位姿
-                    cam_dict=cam_context()#回调获取当前最新的观察
+                    cam_dict=cam_context()
                     motion = tracker_processor.compute(current_tracker_mat)
-                    #相对位姿即该观测下机器人应做出的动作
-                    hand_action_dict=hand_Manus()#回调获取最新手套动作
+                    hand_action_dict=hand_Manus()
                     hand_action_raw=np.asarray(hand_action_dict['right'], dtype=np.float32)
                     hand_command=hand_controller.apply(hand_action_raw)
                     hand_action_array=hand_command.astype(np.float32) / 1000.0
-                    arm_action=motion["arm_action"]#转换为xyz+6drot形式
+                    arm_action=motion["arm_action"]# Absolute target pose as xyz + 6D rotation
                     action=np.concatenate((arm_action,hand_action_array))
                     episode.append(robot_obs["state"], cam_dict, action)
                     target_pose = motion["target_pose"]
                     step += 1
                 
-                    # 发送servoL指令；越界时在URArmInterface内裁剪xyz
+                    # Send servoL command; URArmInterface clips xyz outside the workspace limits.
                     robot.servo(target_pose)
                 else:
                     print("Robot is stopped (protective or emergency).")
-                    break # 退出循环
+                    break # Exit loop
 
-                # 控制循环频率
+                # Maintain the control loop frequency
                 elapsed = time.time() - start_time
                 sleep_time = dt - elapsed
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
-            robot.stop_servo() # 停止伺服控制线程
-            #保存该episode的数据
+            robot.stop_servo() # Stop the servo control thread
+            # Save the episode data
             if len(episode)>0:
-                user_choice = input("是否保存录制数据？(y/n): ").lower().strip()
+                user_choice = input("Save recorded data? (y/n): ").lower().strip()
                 if user_choice=='y':
                     record_file_name = os.path.join(data_dir, datetime.now().strftime("demo_%Y%m%d_%H%M%S")+".h5")
                     print("Data recording")
@@ -162,14 +191,14 @@ def main(args):
                     cprint(f"env_qpos shape: {summary['env_qpos_shape']}", "yellow")
                     cprint(f"save data at step: {summary['seq_length']} in {summary['record_file_name']}", "yellow")
                 else:
-                    print("不保存数据")
+                    print("Data not saved")
             else:
-                print("无数据，不保存")
+                print("No data to save")
 
-            #UR返回初始位置进行reset（阻塞），中间可以确定是否结束采集，而manus不需要reset
+            # Return the UR to its initial position for a blocking reset.
             robot.move_l(initial_pose, 0.3, 0.3)
 
-            #结束一条epsisode后看是否继续采集
+            # Check whether to continue after completing an episode
             if keyboard_control.should_stop_collection():
                 break
 
@@ -187,17 +216,24 @@ def main(args):
         print(f"An error occurred: {e}")
     finally:
         print("Stopping servo control and disconnecting.")
-        keyboard_control.stop()#停止监听线程
-        #意外停止仍然正确关闭
-        cam_context.finalize()#关闭相机进程
-        hand_Manus.finalize()#关闭manus进程
+        keyboard_control.stop()
+        cam_context.finalize()
+        hand_Manus.finalize()
         hand_controller.close()
         robot.close(stop_script=True)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo_dir", type=str, default=os.path.expanduser("~/dp_data/new_task1_expertdata"))
-    parser.add_argument("--demo_name", type=str, default=datetime.now().strftime("demo_%Y%m%d_%H%M%S"))
-    parser.add_argument("--use_wrist_img", type=bool, default=True)
+    parser.add_argument("--use_wrist_img", type=str2bool, default=True)
+    parser.add_argument("--ur_host", type=str, default=DEFAULT_UR_HOST)
+    parser.add_argument("--workspace_x", type=float, nargs=2, default=DEFAULT_WORKSPACE_X, metavar=("MIN", "MAX"))
+    parser.add_argument("--workspace_y", type=float, nargs=2, default=DEFAULT_WORKSPACE_Y, metavar=("MIN", "MAX"))
+    parser.add_argument("--workspace_z", type=float, nargs=2, default=DEFAULT_WORKSPACE_Z, metavar=("MIN", "MAX"))
+    parser.add_argument("--initial_pose", type=float, nargs=6, default=DEFAULT_INITIAL_POSE, metavar=("X", "Y", "Z", "RX", "RY", "RZ"))
+    parser.add_argument("--dt", type=positive_float, default=DEFAULT_DT)
+    parser.add_argument("--max_length", type=positive_int, default=DEFAULT_MAX_LENGTH)
+    parser.add_argument("--hand_port", type=str, default=DEFAULT_HAND_PORT)
+    parser.add_argument("--hand_baudrate", type=positive_int, default=DEFAULT_HAND_BAUDRATE)
     args = parser.parse_args()
     main(args)

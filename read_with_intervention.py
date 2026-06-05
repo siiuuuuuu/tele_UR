@@ -1,21 +1,35 @@
+import argparse
 import glob
 import os
+import time
 
 import cv2
 import h5py
 import numpy as np
 
+import read as dual_viewer
+
+
+WINDOW_NAME = "H5 Intervention Viewer"
+DEFAULT_FPS = 25.0
+DEFAULT_DATA_FOLDER = os.path.expanduser("~/dp_data/offlineRL_data/task2_iter1")
 
 TRUE_WORDS = {"1", "true", "t", "yes", "y", "success", "ok"}
 FALSE_WORDS = {"0", "false", "f", "no", "n", "fail", "failed"}
 
+COLOR_AUTONOMOUS = (82, 139, 91)
+COLOR_INTERVENTION = (60, 74, 211)
+COLOR_SUCCESS = (91, 201, 125)
+COLOR_FAILURE = (70, 78, 220)
+COLOR_UNKNOWN = (62, 190, 245)
+COLOR_PLAYHEAD = (250, 250, 250)
+
 
 def _extract_success_bool(success_attr):
-    """将H5属性中的success解析为bool，无法判断时返回None。"""
+    """Parse an H5 success attribute into bool, returning None if unknown."""
     if success_attr is None:
         return None
 
-    # h5属性可能是标量、数组、bytes 或 tuple(保存时末尾逗号可能导致)
     if isinstance(success_attr, np.ndarray):
         if success_attr.size == 0:
             return None
@@ -42,24 +56,24 @@ def _extract_success_bool(success_attr):
         return None
 
 
-def _success_to_str(success_bool):
+def _success_badge(success_bool):
     if success_bool is True:
-        return "True"
+        return "EPISODE SUCCESS", COLOR_SUCCESS
     if success_bool is False:
-        return "False"
-    return "Unknown"
+        return "EPISODE FAILURE", COLOR_FAILURE
+    return "SUCCESS UNKNOWN", COLOR_UNKNOWN
 
 
 def collect_folder_success_stats(h5_files):
-    """统计文件夹内success为True/False/Unknown的文件数。"""
+    """Count successful, failed, and unknown episodes."""
     success_count = 0
     fail_count = 0
     unknown_count = 0
 
     for file_path in h5_files:
         try:
-            with h5py.File(file_path, "r") as f:
-                success_bool = _extract_success_bool(f.attrs.get("success"))
+            with h5py.File(file_path, "r") as h5_file:
+                success_bool = _extract_success_bool(h5_file.attrs.get("success"))
             if success_bool is True:
                 success_count += 1
             elif success_bool is False:
@@ -67,192 +81,455 @@ def collect_folder_success_stats(h5_files):
             else:
                 unknown_count += 1
         except Exception as exc:
-            print(f"读取统计时出错 {os.path.basename(file_path)}: {exc}")
+            print(f"Error reading success status from {os.path.basename(file_path)}: {exc}")
             unknown_count += 1
 
     return success_count, fail_count, unknown_count
 
 
-def play_h5_video(file_path):
-    """播放单个H5文件中的视频数据，并显示 intervention/autonomous 与 success 状态。"""
+def _draw_badge(canvas, text, right_x, top_y, color, width):
+    height = 38
+    left_x = right_x - width
+    cv2.rectangle(canvas, (left_x, top_y), (right_x, top_y + height), color, -1)
+    text_size = cv2.getTextSize(
+        text,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        2,
+    )[0]
+    dual_viewer._draw_text(
+        canvas,
+        text,
+        (
+            left_x + (width - text_size[0]) // 2,
+            top_y + (height + text_size[1]) // 2,
+        ),
+        0.52,
+        dual_viewer.COLOR_BACKGROUND,
+        2,
+    )
+    return left_x
+
+
+def _draw_mode_border(canvas, mode_color):
+    panel_y = dual_viewer.HEADER_HEIGHT + dual_viewer.MARGIN
+    panel_height = (
+        dual_viewer.WINDOW_HEIGHT
+        - dual_viewer.HEADER_HEIGHT
+        - dual_viewer.FOOTER_HEIGHT
+        - 2 * dual_viewer.MARGIN
+    )
+    panel_width = (
+        dual_viewer.WINDOW_WIDTH
+        - 2 * dual_viewer.MARGIN
+        - dual_viewer.PANEL_GAP
+    ) // 2
+    panel_rects = (
+        (dual_viewer.MARGIN, panel_y, panel_width, panel_height),
+        (
+            dual_viewer.MARGIN + panel_width + dual_viewer.PANEL_GAP,
+            panel_y,
+            panel_width,
+            panel_height,
+        ),
+    )
+
+    for x, y, width, height in panel_rects:
+        cv2.rectangle(
+            canvas,
+            (x, y),
+            (x + width, y + height),
+            mode_color,
+            6,
+            cv2.LINE_AA,
+        )
+
+
+def _draw_intervention_timeline(canvas, intervention_data, frame_idx):
+    footer_y = dual_viewer.WINDOW_HEIGHT - dual_viewer.FOOTER_HEIGHT
+    timeline_x = dual_viewer.MARGIN
+    timeline_y = footer_y + 16
+    timeline_width = dual_viewer.WINDOW_WIDTH - 2 * dual_viewer.MARGIN
+    timeline_height = 12
+
+    intervention_data = np.asarray(intervention_data, dtype=bool).reshape(-1)
+    if len(intervention_data) == 0:
+        intervention_data = np.zeros(1, dtype=bool)
+
+    timeline = np.empty((1, len(intervention_data), 3), dtype=np.uint8)
+    timeline[0, ~intervention_data] = COLOR_AUTONOMOUS
+    timeline[0, intervention_data] = COLOR_INTERVENTION
+    timeline = cv2.resize(
+        timeline,
+        (timeline_width, timeline_height),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    canvas[
+        timeline_y : timeline_y + timeline_height,
+        timeline_x : timeline_x + timeline_width,
+    ] = timeline
+    cv2.rectangle(
+        canvas,
+        (timeline_x, timeline_y),
+        (timeline_x + timeline_width, timeline_y + timeline_height),
+        dual_viewer.COLOR_PANEL_BORDER,
+        1,
+    )
+
+    progress = min(1.0, max(0.0, (frame_idx + 1) / len(intervention_data)))
+    playhead_x = timeline_x + int(progress * timeline_width)
+    cv2.line(
+        canvas,
+        (playhead_x, timeline_y - 4),
+        (playhead_x, timeline_y + timeline_height + 4),
+        COLOR_PLAYHEAD,
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def compose_intervention_dashboard(
+    front_frame,
+    wrist_frame,
+    file_name,
+    frame_idx,
+    total_frames,
+    fps,
+    intervention_data,
+    success_bool,
+    paused=False,
+    warning=None,
+):
+    """Compose a synchronized dual-camera intervention playback dashboard."""
+    current_intervention = bool(intervention_data[frame_idx])
+    mode_text = "INTERVENTION" if current_intervention else "AUTONOMOUS"
+    mode_color = COLOR_INTERVENTION if current_intervention else COLOR_AUTONOMOUS
+
+    canvas = np.full(
+        (dual_viewer.WINDOW_HEIGHT, dual_viewer.WINDOW_WIDTH, 3),
+        dual_viewer.COLOR_BACKGROUND,
+        dtype=np.uint8,
+    )
+    cv2.rectangle(
+        canvas,
+        (0, 0),
+        (dual_viewer.WINDOW_WIDTH, dual_viewer.HEADER_HEIGHT),
+        dual_viewer.COLOR_HEADER,
+        -1,
+    )
+
+    dual_viewer._draw_text(
+        canvas,
+        "INTERVENTION PLAYBACK",
+        (dual_viewer.MARGIN, 37),
+        0.86,
+        dual_viewer.COLOR_TEXT,
+        2,
+    )
+    file_text = dual_viewer._fit_text(
+        file_name,
+        dual_viewer.WINDOW_WIDTH - 620,
+        0.52,
+        1,
+    )
+    dual_viewer._draw_text(
+        canvas,
+        file_text,
+        (dual_viewer.MARGIN, 69),
+        0.52,
+        dual_viewer.COLOR_MUTED,
+        1,
+    )
+    if warning:
+        warning_text = dual_viewer._fit_text(
+            warning,
+            dual_viewer.WINDOW_WIDTH - 620,
+            0.45,
+            1,
+        )
+        dual_viewer._draw_text(
+            canvas,
+            warning_text,
+            (dual_viewer.MARGIN, 89),
+            0.45,
+            dual_viewer.COLOR_WARNING,
+            1,
+        )
+
+    right_x = dual_viewer.WINDOW_WIDTH - dual_viewer.MARGIN
+    success_text, success_color = _success_badge(success_bool)
+    right_x = _draw_badge(canvas, success_text, right_x, 27, success_color, 205) - 12
+    playback_text = "PAUSED" if paused else "PLAYING"
+    playback_color = dual_viewer.COLOR_WARNING if paused else dual_viewer.COLOR_SUCCESS
+    right_x = _draw_badge(canvas, playback_text, right_x, 27, playback_color, 125) - 12
+    mode_width = 190 if current_intervention else 175
+    _draw_badge(canvas, mode_text, right_x, 27, mode_color, mode_width)
+
+    panel_y = dual_viewer.HEADER_HEIGHT + dual_viewer.MARGIN
+    panel_height = (
+        dual_viewer.WINDOW_HEIGHT
+        - dual_viewer.HEADER_HEIGHT
+        - dual_viewer.FOOTER_HEIGHT
+        - 2 * dual_viewer.MARGIN
+    )
+    panel_width = (
+        dual_viewer.WINDOW_WIDTH
+        - 2 * dual_viewer.MARGIN
+        - dual_viewer.PANEL_GAP
+    ) // 2
+    left_rect = (dual_viewer.MARGIN, panel_y, panel_width, panel_height)
+    right_rect = (
+        dual_viewer.MARGIN + panel_width + dual_viewer.PANEL_GAP,
+        panel_y,
+        panel_width,
+        panel_height,
+    )
+    dual_viewer._draw_camera_panel(
+        canvas,
+        front_frame,
+        left_rect,
+        "FRONT CAMERA",
+        "color",
+    )
+    dual_viewer._draw_camera_panel(
+        canvas,
+        wrist_frame,
+        right_rect,
+        "WRIST CAMERA",
+        "wrist_color",
+    )
+    _draw_mode_border(canvas, mode_color)
+
+    footer_y = dual_viewer.WINDOW_HEIGHT - dual_viewer.FOOTER_HEIGHT
+    cv2.rectangle(
+        canvas,
+        (0, footer_y),
+        (dual_viewer.WINDOW_WIDTH, dual_viewer.WINDOW_HEIGHT),
+        dual_viewer.COLOR_HEADER,
+        -1,
+    )
+    _draw_intervention_timeline(canvas, intervention_data, frame_idx)
+
+    intervention_steps = int(np.count_nonzero(intervention_data))
+    autonomous_steps = total_frames - intervention_steps
+    current_time = dual_viewer._format_time(frame_idx / fps)
+    total_time = dual_viewer._format_time(total_frames / fps)
+    playback_info = (
+        f"Frame {frame_idx + 1:,} / {total_frames:,}    "
+        f"{current_time} / {total_time}    {fps:g} FPS    "
+        f"Autonomous {autonomous_steps:,}    Intervention {intervention_steps:,}"
+    )
+    dual_viewer._draw_text(
+        canvas,
+        playback_info,
+        (dual_viewer.MARGIN, footer_y + 58),
+        0.53,
+        dual_viewer.COLOR_TEXT,
+        1,
+    )
+    controls = (
+        "Green  Autonomous     Red  Intervention     SPACE  Pause / Resume     "
+        "F / B  +/- 10 frames     R  Restart     N  Next     Q  Quit"
+    )
+    dual_viewer._draw_text(
+        canvas,
+        controls,
+        (dual_viewer.MARGIN, footer_y + 91),
+        0.43,
+        dual_viewer.COLOR_MUTED,
+        1,
+    )
+    return canvas
+
+
+def play_h5_video(file_path, fps=DEFAULT_FPS):
+    """Play synchronized camera streams with intervention and success overlays."""
+    file_name = os.path.basename(file_path)
     try:
-        with h5py.File(file_path, "r") as f:
-            if "color" not in f:
-                print(f"文件 {os.path.basename(file_path)} 中没有找到color数据，跳过")
+        with h5py.File(file_path, "r") as h5_file:
+            if "color" not in h5_file:
+                print(f"Skipping {file_name}: dataset 'color' was not found.")
                 return False
 
-            color_data = f["wrist_color"][:]
+            front_data = h5_file["color"]
+            wrist_data = h5_file.get("wrist_color")
+            front_frames = len(front_data)
+            warnings = []
 
-            if "intervention" in f:
-                intervention_data = np.array(f["intervention"][:]).reshape(-1)
+            if front_frames == 0:
+                print(f"Skipping {file_name}: dataset 'color' is empty.")
+                return False
+
+            total_frames = front_frames
+            if wrist_data is None or len(wrist_data) == 0:
+                wrist_data = None
+                warnings.append("wrist_color is unavailable")
             else:
-                intervention_data = np.zeros(len(color_data), dtype=np.uint8)
-                print(f"文件 {os.path.basename(file_path)} 中没有找到intervention数据，默认按autonomous显示")
+                total_frames = min(total_frames, len(wrist_data))
+                if front_frames != len(wrist_data):
+                    warnings.append(
+                        f"camera frame mismatch: color={front_frames}, wrist_color={len(wrist_data)}"
+                    )
 
-            if len(intervention_data) != len(color_data):
-                print(
-                    f"警告: intervention帧数({len(intervention_data)})与视频帧数({len(color_data)})不一致，"
-                    "超出部分将按autonomous处理"
+            if "intervention" in h5_file:
+                intervention_data = np.asarray(
+                    h5_file["intervention"][:],
+                    dtype=bool,
+                ).reshape(-1)
+                if len(intervention_data) != total_frames:
+                    warnings.append(
+                        f"intervention length={len(intervention_data)}, video length={total_frames}"
+                    )
+                    if len(intervention_data) < total_frames:
+                        intervention_data = np.pad(
+                            intervention_data,
+                            (0, total_frames - len(intervention_data)),
+                            constant_values=False,
+                        )
+                    else:
+                        intervention_data = intervention_data[:total_frames]
+            else:
+                intervention_data = np.zeros(total_frames, dtype=bool)
+                warnings.append("intervention is unavailable; treating all frames as autonomous")
+
+            success_bool = _extract_success_bool(h5_file.attrs.get("success"))
+            warning = "; ".join(warnings) if warnings else None
+
+            print(f"\nPlaying: {file_name}")
+            print(f"  success: {_success_badge(success_bool)[0]}")
+            print(f"  color: {front_data.shape}")
+            print(f"  wrist_color: {None if wrist_data is None else wrist_data.shape}")
+            print(f"  synchronized frames: {total_frames}")
+            print(
+                f"  autonomous/intervention: "
+                f"{total_frames - int(np.count_nonzero(intervention_data))}/"
+                f"{int(np.count_nonzero(intervention_data))}"
+            )
+            print("  Controls: SPACE pause/resume, F/B seek, R restart, N next, Q quit")
+
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(
+                WINDOW_NAME,
+                dual_viewer.WINDOW_WIDTH,
+                dual_viewer.WINDOW_HEIGHT,
+            )
+
+            paused = False
+            frame_idx = 0
+            frame_delay_ms = max(1, int(round(1000.0 / fps)))
+
+            while frame_idx < total_frames:
+                loop_start = time.monotonic()
+                front_frame = front_data[frame_idx]
+                wrist_frame = None if wrist_data is None else wrist_data[frame_idx]
+                dashboard = compose_intervention_dashboard(
+                    front_frame=front_frame,
+                    wrist_frame=wrist_frame,
+                    file_name=file_name,
+                    frame_idx=frame_idx,
+                    total_frames=total_frames,
+                    fps=fps,
+                    intervention_data=intervention_data,
+                    success_bool=success_bool,
+                    paused=paused,
+                    warning=warning,
                 )
+                cv2.imshow(WINDOW_NAME, dashboard)
 
-            success_bool = _extract_success_bool(f.attrs.get("success"))
-            success_str = _success_to_str(success_bool)
+                if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                    return "quit_all"
 
-        print(f"\n正在播放: {os.path.basename(file_path)}")
-        print(f"Success 标记: {success_str}")
-        print(f"Color data shape: {color_data.shape}")
-        print(f"Total frames: {color_data.shape[0]}")
-        print(f"Frame dimensions: {color_data.shape[1]}x{color_data.shape[2]}")
+                render_ms = int((time.monotonic() - loop_start) * 1000)
+                wait_ms = 30 if paused else max(1, frame_delay_ms - render_ms)
+                key = cv2.waitKey(wait_ms) & 0xFF
 
-        fps = 25
-        frame_delay = int(1000 / fps)
+                if key == ord("q"):
+                    return "quit_all"
+                if key == ord("n"):
+                    return "next_file"
+                if key == ord(" "):
+                    paused = not paused
+                    continue
+                if key == ord("r"):
+                    frame_idx = 0
+                    paused = False
+                    continue
+                if key == ord("f"):
+                    frame_idx = min(frame_idx + 10, total_frames - 1)
+                    continue
+                if key == ord("b"):
+                    frame_idx = max(frame_idx - 10, 0)
+                    continue
+                if not paused:
+                    frame_idx += 1
 
-        print("播放控制:")
-        print("  按 'q' 键退出播放")
-        print("  按 'n' 键播放下一个文件")
-        print("  按空格键暂停/继续")
-        print("  按 'r' 键重新开始当前文件")
-        print("  按 'f' 键快进")
-        print("  按 'b' 键快退")
+            return True
 
-        paused = False
-        frame_idx = 0
-
-        while frame_idx < len(color_data):
-            if not paused:
-                frame = color_data[frame_idx]
-
-                if frame.shape[2] == 3:
-                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                else:
-                    frame_bgr = frame
-
-                intervention_flag = 0
-                if frame_idx < len(intervention_data):
-                    intervention_flag = int(intervention_data[frame_idx])
-
-                if intervention_flag == 1:
-                    mode_text = "INTERVENTION"
-                    mode_color = (0, 0, 255)
-                else:
-                    mode_text = "AUTONOMOUS"
-                    mode_color = (0, 255, 0)
-
-                if success_bool is True:
-                    success_text = "SUCCESS: true"
-                    success_color = (0, 255, 0)
-                elif success_bool is False:
-                    success_text = "SUCCESS: false"
-                    success_color = (0, 0, 255)
-                else:
-                    success_text = "SUCCESS: unknown"
-                    success_color = (0, 255, 255)
-
-                cv2.putText(
-                    frame_bgr,
-                    mode_text,
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    mode_color,
-                    2,
-                )
-
-                cv2.putText(
-                    frame_bgr,
-                    success_text,
-                    (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    success_color,
-                    2,
-                )
-
-                info_text = f"Frame: {frame_idx + 1}/{len(color_data)} | File: {os.path.basename(file_path)}"
-                cv2.putText(
-                    frame_bgr,
-                    info_text,
-                    (10, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (255, 255, 255),
-                    2,
-                )
-
-                cv2.imshow("H5 Video Playback", frame_bgr)
-                frame_idx += 1
-
-            key = cv2.waitKey(frame_delay) & 0xFF
-
-            if key == ord("q"):
-                cv2.destroyAllWindows()
-                return "quit_all"
-            if key == ord("n"):
-                cv2.destroyAllWindows()
-                return "next_file"
-            if key == ord(" "):
-                paused = not paused
-                print(f"{'暂停' if paused else '继续播放'}")
-            if key == ord("r"):
-                frame_idx = 0
-                paused = False
-            if key == ord("f"):
-                frame_idx = min(frame_idx + 10, len(color_data) - 1)
-            if key == ord("b"):
-                frame_idx = max(frame_idx - 10, 0)
-
-        cv2.destroyAllWindows()
-        return True
-
-    except Exception as e:
-        print(f"播放文件 {os.path.basename(file_path)} 时出错: {e}")
+    except Exception as exc:
+        print(f"Error while playing {file_name}: {exc}")
         return False
+    finally:
+        cv2.destroyAllWindows()
 
 
-if __name__ == "__main__":
-    data_folder = "~/dp_data/offlineRL_data/task2_iter1" 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Play synchronized color and wrist_color streams with intervention "
+            "and episode success overlays."
+        )
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=DEFAULT_DATA_FOLDER,
+        help="H5 file or directory containing H5 files.",
+    )
+    parser.add_argument(
+        "--pattern",
+        default="demo_*.h5",
+        help="Glob pattern used when path is a directory.",
+    )
+    parser.add_argument("--fps", type=float, default=DEFAULT_FPS, help="Playback frame rate.")
+    args = parser.parse_args()
+    if args.fps <= 0:
+        parser.error("--fps must be greater than zero")
+    return args
 
 
-    h5_files = sorted(glob.glob(os.path.join(data_folder, "demo_*.h5")))
+def collect_h5_files(path, pattern):
+    expanded_path = os.path.abspath(os.path.expanduser(path))
+    if os.path.isfile(expanded_path):
+        return [expanded_path]
+    return sorted(glob.glob(os.path.join(expanded_path, pattern)))
+
+
+def main():
+    args = parse_args()
+    h5_files = collect_h5_files(args.path, args.pattern)
     if not h5_files:
-        print(f"在文件夹 {data_folder} 中没有找到.h5文件")
+        print(f"No H5 files found at {os.path.expanduser(args.path)}")
         raise SystemExit(0)
 
-    print(f"找到 {len(h5_files)} 个.h5文件:")
-    for i, file in enumerate(h5_files):
-        print(f"  {i + 1}. {os.path.basename(file)}")
+    print(f"Found {len(h5_files)} H5 file(s):")
+    for index, file_path in enumerate(h5_files, start=1):
+        print(f"  {index}. {os.path.basename(file_path)}")
 
     success_count, fail_count, unknown_count = collect_folder_success_stats(h5_files)
 
-    current_file_idx = 0
-    while current_file_idx < len(h5_files):
-        file_path = h5_files[current_file_idx]
-        result = play_h5_video(file_path)
-
+    for file_path in h5_files:
+        result = play_h5_video(file_path, fps=args.fps)
         if result == "quit_all":
-            print("\n退出播放")
+            print("\nPlayback stopped.")
             break
-        if result == "next_file":
-            current_file_idx += 1
-            if current_file_idx >= len(h5_files):
-                print("\n已经播放完所有文件")
-                break
-        elif result:
-            current_file_idx += 1
-            if current_file_idx < len(h5_files):
-                print("\n3秒后将自动播放下一个文件...")
-                cv2.waitKey(3000)
-            else:
-                print("\n已经播放完所有文件")
-        else:
-            current_file_idx += 1
-            if current_file_idx < len(h5_files):
-                print("\n尝试播放下一个文件...")
 
-    print("\n文件夹success统计:")
-    print(f"  Success(True) 数量: {success_count}")
-    print(f"  Failure(False) 数量: {fail_count}")
-    if unknown_count > 0:
-        print(f"  Unknown 数量: {unknown_count}")
+    print("\nFolder success summary:")
+    print(f"  Success: {success_count}")
+    print(f"  Failure: {fail_count}")
+    if unknown_count:
+        print(f"  Unknown: {unknown_count}")
+    print("Playback finished.")
 
-    print("播放结束")
+
+if __name__ == "__main__":
+    main()
