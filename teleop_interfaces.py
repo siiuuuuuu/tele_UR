@@ -21,6 +21,7 @@ class URArmInterface:
         servo_dt=0.02,
         lookahead_time=0.2,
         gain=500,
+        control_frequency=None,
     ):
         self.host = host
         self.workspace_limits = workspace_limits
@@ -29,13 +30,24 @@ class URArmInterface:
         self.servo_dt = servo_dt
         self.lookahead_time = lookahead_time
         self.gain = gain
+        self.control_frequency = (
+            None if control_frequency is None else float(control_frequency)
+        )
+        if self.control_frequency is not None and self.control_frequency <= 0:
+            raise ValueError("control_frequency must be positive")
         self.rtde_c = None
         self.rtde_r = None
         self.connect()
 
     def connect(self):
         try:
-            self.rtde_c = rtde_control.RTDEControlInterface(self.host)
+            if self.control_frequency is None:
+                self.rtde_c = rtde_control.RTDEControlInterface(self.host)
+            else:
+                self.rtde_c = rtde_control.RTDEControlInterface(
+                    self.host,
+                    self.control_frequency,
+                )
             self.rtde_r = rtde_receive.RTDEReceiveInterface(self.host)
             print("RTDE connected")
         except Exception as e:
@@ -103,7 +115,7 @@ class URArmInterface:
             servo_pose = self._clip_pose(target_pose)
             print("Target out of workspace! Stopping servo.")
 
-        self.rtde_c.servoL(
+        return self.rtde_c.servoL(
             servo_pose,
             self.servo_speed,
             self.servo_acceleration,
@@ -112,9 +124,24 @@ class URArmInterface:
             self.gain,
         )
 
+    def init_servo_period(self):
+        if hasattr(self.rtde_c, "initPeriod"):
+            return self.rtde_c.initPeriod()
+        return time.monotonic()
+
+    def wait_servo_period(self, period_start):
+        if hasattr(self.rtde_c, "waitPeriod"):
+            self.rtde_c.waitPeriod(period_start)
+            return
+
+        sleep_time = self.servo_dt - (time.monotonic() - period_start)
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
     def stop_servo(self):
         if self.rtde_c and self.rtde_c.isConnected():
-            self.rtde_c.servoStop()
+            return self.rtde_c.servoStop()
+        return None
 
     def close(self, stop_script=False):
         if self.rtde_c and self.rtde_c.isConnected():

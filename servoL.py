@@ -17,6 +17,8 @@ import os
 from termcolor import cprint
 import argparse
 from datetime import datetime
+from arm_servo_controller import HighRateArmController
+from hand_control_controller import HighRateHandController
 from SM_inspire_manus_process import inspire_Manus
 from teleop_interfaces import InspireHandController, URArmInterface
 from tracker_pose_processor import TrackerPoseProcessor
@@ -27,6 +29,14 @@ DEFAULT_WORKSPACE_Y = [-1.5, 1.5]
 DEFAULT_WORKSPACE_Z = [-0.5, 1.5]
 DEFAULT_INITIAL_POSE = [0.248, 0.1212, 0.3978, 1.16, 1.25, 1.28]
 DEFAULT_DT = 1.0 / 25.0
+DEFAULT_TRACKER_FREQUENCY = 90.0
+DEFAULT_SERVO_FREQUENCY = 125.0
+DEFAULT_TRACKER_TIMEOUT = 0.25
+DEFAULT_HAND_FREQUENCY = 120.0
+DEFAULT_MANUS_TIMEOUT = 0.25
+DEFAULT_HAND_SMOOTHING_OMEGA = 25.0
+DEFAULT_HAND_SMOOTHING_DAMPING = 0.8
+DEFAULT_HAND_INPUT_ALPHA = 0.6
 DEFAULT_MAX_LENGTH = 1000
 DEFAULT_HAND_PORT = "/dev/ttyUSB0"
 DEFAULT_HAND_BAUDRATE = 115200
@@ -78,9 +88,10 @@ def main(args):
             workspace_limits,
             servo_speed=0.005,
             servo_acceleration=0.005,
-            servo_dt=dt/2,
+            servo_dt=1.0 / args.servo_frequency,
             lookahead_time=0.2,
             gain=500,
+            control_frequency=args.servo_frequency,
         )
     except Exception:
         print("Cannot connect to UR5, exiting")
@@ -121,6 +132,24 @@ def main(args):
     keyboard_control = KeyboardControl()
     keyboard_control.start()# Start listener thread
     time.sleep(0.1)
+    arm_controller = HighRateArmController(
+        robot=robot,
+        tracker_processor=tracker_processor,
+        tracker_device=v.devices["tracker_1"],
+        tracker_frequency=args.tracker_frequency,
+        servo_frequency=args.servo_frequency,
+        tracker_timeout=args.tracker_timeout,
+    )
+    hand_control_worker = HighRateHandController(
+        manus_source=hand_Manus,
+        hand_controller=hand_controller,
+        control_frequency=args.hand_frequency,
+        manus_timeout=args.manus_timeout,
+        smoothing_natural_frequency=args.hand_smoothing_omega,
+        smoothing_damping_ratio=args.hand_smoothing_damping,
+        smoothing_input_alpha=args.hand_input_alpha,
+    )
+    control_workers_running = False
 
     try:
         while not keyboard_control.should_stop_collection():
@@ -128,54 +157,61 @@ def main(args):
             # Wait for recording while the environment is reset and the operator's hand is aligned.
             keyboard_control.wait_recording()
             episode = EpisodeBuffer(use_wrist_img=use_wrist_img)
-            tracker_processor.clear_reference()
-            print(f"Control frequency set to: {1/dt:.2f} Hz\r")
+            arm_controller.start()
+            control_workers_running = True
+            hand_control_worker.start()
+            print(f"Recording frequency set to: {1/dt:.2f} Hz\r")
+            print(f"Tracker frequency set to: {args.tracker_frequency:.2f} Hz\r")
+            print(f"Servo frequency set to: {args.servo_frequency:.2f} Hz\r")
+            print(f"Hand control frequency set to: {args.hand_frequency:.2f} Hz\r")
+            print(
+                "Hand smoother set to: "
+                f"omega={args.hand_smoothing_omega:.2f}, "
+                f"damping={args.hand_smoothing_damping:.2f}, "
+                f"input_alpha={args.hand_input_alpha:.2f}\r"
+            )
             print("Starting recording tele-operation...\r")
             print("Recording started. Press 's' to stop recording.\r")    
             step = 0
-            while step < max_length and keyboard_control.is_recording():
-                start_time = time.time()
-                # Check robot status
-                if robot.is_ready():
-                    current_tracker_mat = tracker_processor.read_tracker_mat(v.devices["tracker_1"])
-                    if current_tracker_mat is None:
-                        time.sleep(0.01)
-                        continue
-                    if not tracker_processor.has_reference():
-                        tracker_processor.reset_reference(current_tracker_mat)
-                        print("Initial tracking position recorded. Starting servo control...")
-                        current_pose = robot.get_tcp_pose()
-                        robot.servo(current_pose)
-                        continue
-                    robot_obs=robot.get_obs()
-                    if robot_obs is None:
-                        time.sleep(0.01)
-                        continue
-                    cam_dict=cam_context()
-                    motion = tracker_processor.compute(current_tracker_mat)
-                    hand_action_dict=hand_Manus()
-                    hand_action_raw=np.asarray(hand_action_dict['right'], dtype=np.float32)
-                    hand_command=hand_controller.apply(hand_action_raw)
-                    hand_action_array=hand_command.astype(np.float32) / 1000.0
-                    arm_action=motion["arm_action"]# Absolute target pose as xyz + 6D rotation
-                    action=np.concatenate((arm_action,hand_action_array))
-                    episode.append(robot_obs["state"], cam_dict, action)
-                    target_pose = motion["target_pose"]
-                    step += 1
-                
-                    # Send servoL command; URArmInterface clips xyz outside the workspace limits.
-                    robot.servo(target_pose)
-                else:
-                    print("Robot is stopped (protective or emergency).")
-                    break # Exit loop
+            try:
+                while step < max_length and keyboard_control.is_recording():
+                    start_time = time.monotonic()
+                    # Check robot status
+                    if robot.is_ready():
+                        motion = arm_controller.latest_motion()
+                        if motion is None:
+                            time.sleep(0.01)
+                            continue
+                        robot_obs=robot.get_obs()
+                        if robot_obs is None:
+                            time.sleep(0.01)
+                            continue
+                        cam_dict=cam_context()
+                        hand_command = hand_control_worker.latest_command()
+                        if hand_command is None:
+                            time.sleep(0.01)
+                            continue
+                        hand_action_array=hand_command.astype(np.float32) / 1000.0
+                        arm_action=motion["arm_action"]# Absolute target pose as xyz + 6D rotation
+                        action=np.concatenate((arm_action,hand_action_array))
+                        episode.append(robot_obs["state"], cam_dict, action)
+                        step += 1
+                    else:
+                        print("Robot is stopped (protective or emergency).")
+                        break # Exit loop
 
-                # Maintain the control loop frequency
-                elapsed = time.time() - start_time
-                sleep_time = dt - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+                    # Maintain the recording loop frequency
+                    elapsed = time.monotonic() - start_time
+                    sleep_time = dt - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+            finally:
+                hand_control_worker.stop()
+                arm_controller.stop()
+                control_workers_running = False
+                hand_control_worker.raise_if_failed()
+                arm_controller.raise_if_failed()
 
-            robot.stop_servo() # Stop the servo control thread
             # Save the episode data
             if len(episode)>0:
                 user_choice = input("Save recorded data? (y/n): ").lower().strip()
@@ -216,6 +252,9 @@ def main(args):
         print(f"An error occurred: {e}")
     finally:
         print("Stopping servo control and disconnecting.")
+        if control_workers_running:
+            hand_control_worker.stop()
+            arm_controller.stop()
         keyboard_control.stop()
         cam_context.finalize()
         hand_Manus.finalize()
@@ -232,6 +271,14 @@ if __name__ == '__main__':
     parser.add_argument("--workspace_z", type=float, nargs=2, default=DEFAULT_WORKSPACE_Z, metavar=("MIN", "MAX"))
     parser.add_argument("--initial_pose", type=float, nargs=6, default=DEFAULT_INITIAL_POSE, metavar=("X", "Y", "Z", "RX", "RY", "RZ"))
     parser.add_argument("--dt", type=positive_float, default=DEFAULT_DT)
+    parser.add_argument("--tracker_frequency", type=positive_float, default=DEFAULT_TRACKER_FREQUENCY)
+    parser.add_argument("--servo_frequency", type=positive_float, default=DEFAULT_SERVO_FREQUENCY)
+    parser.add_argument("--tracker_timeout", type=positive_float, default=DEFAULT_TRACKER_TIMEOUT)
+    parser.add_argument("--hand_frequency", type=positive_float, default=DEFAULT_HAND_FREQUENCY)
+    parser.add_argument("--manus_timeout", type=positive_float, default=DEFAULT_MANUS_TIMEOUT)
+    parser.add_argument("--hand_smoothing_omega", type=positive_float, default=DEFAULT_HAND_SMOOTHING_OMEGA)
+    parser.add_argument("--hand_smoothing_damping", type=positive_float, default=DEFAULT_HAND_SMOOTHING_DAMPING)
+    parser.add_argument("--hand_input_alpha", type=positive_float, default=DEFAULT_HAND_INPUT_ALPHA)
     parser.add_argument("--max_length", type=positive_int, default=DEFAULT_MAX_LENGTH)
     parser.add_argument("--hand_port", type=str, default=DEFAULT_HAND_PORT)
     parser.add_argument("--hand_baudrate", type=positive_int, default=DEFAULT_HAND_BAUDRATE)

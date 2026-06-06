@@ -57,7 +57,7 @@ As shown above, install the Inspire dexterous hand so that its palm normal point
 
 Before collecting data, make sure the following hardware and services are ready:
 
-- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in the `UR_HOST` constant in `servoL.py` and `traj_valid.py`. If jitter is severe, reduce speed to 50%.
+- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in `collect_data.sh` and `replay_trajectory.sh`. Teleoperation samples the Vive Tracker at `90 Hz`, sends `servoL` at `125 Hz`, controls the Inspire hand through a second-order smoother at `120 Hz`, and records demonstrations at `25 Hz`. Use `500 Hz` servo control only with an e-Series controller.
 - UR controller: Connect the computer to the robot controller with an Ethernet cable, either directly or through a LAN switch. Configure both devices on the same IP subnet, and enable Remote Control/RTDE on the robot.
 - Inspire hand: default serial port is `/dev/ttyUSB0`, baud rate `115200`.
 - RealSense cameras: First install the [Intel RealSense SDK (librealsense)](https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md), including its udev rules. Then connect the two cameras; the code uses `front_cam_idx=0` and `right_cam_idx=1` by default, with device serial numbers sorted before indexing.
@@ -105,6 +105,17 @@ HDF5 fields:
 - `wrist_color`: wrist camera RGB image, present when `use_wrist_img` is enabled.
 - `env_qpos_proprioception`: robot state, `[6 joint + 6 TCP pose]`, shape `[T, 12]`.
 - `action`: action vector, `[absolute target xyz + 6D rotation + 6 hand]`, shape `[T, 15]`.
+
+The high-rate tracker, arm servo, and Inspire hand control loops run
+independently from the `25 Hz` recording loop. Change `tracker_frequency`,
+`servo_frequency`, `tracker_timeout`, `hand_frequency`, and `manus_timeout`
+near the top of `collect_data.sh`; these settings do not change the HDF5
+sampling frequency or fields.
+
+The Inspire hand smoother defaults to natural frequency `25 rad/s`, damping
+ratio `0.8`, and input smoothing coefficient `0.6`. Tune
+`hand_smoothing_omega`, `hand_smoothing_damping`, and `hand_input_alpha` in
+`collect_data.sh`.
 
 ## 5. Convert HDF5 to Zarr
 
@@ -187,4 +198,3 @@ Please consider citing our work if you find this repository useful:
 ## Acknowledgement
 
 We thank the authors of [iDP3 / Humanoid-Teleoperation](https://github.com/YanjieZe/Humanoid-Teleoperation) for their open-source work, which provided valuable reference and inspiration for this project.
-

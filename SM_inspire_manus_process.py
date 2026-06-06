@@ -313,6 +313,12 @@ class inspire_Manus:
         if self.use_left_hand:
             self.lefthand_process.start()
 
+    def latest_right_sample(self):
+        """Return the latest right-hand command without waiting for a new sample."""
+        if not self.use_right_hand:
+            return None
+        return self.right_buffer.latest(copy_data=True)
+
     def __call__(self):
         action_dict = {}
 
