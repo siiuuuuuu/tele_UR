@@ -1,6 +1,6 @@
 # tele_UR
 
-Teleoperation data collection code based on UR RTDE `servoL`. The main entry point is `servoL.py`: it uses an OpenVR tracker to control the UR5 TCP pose, maps MANUS glove data to Inspire hand commands, records RealSense images, and saves each demonstration as an HDF5 file.
+This codebase is primarily used for demonstration data collection and also serves as the foundation for human-in-the-loop data collection, so please configure it first. The main entry point is `servoL.py`: it uses an OpenVR tracker to control the UR5 TCP pose, maps MANUS glove data to Inspire hand commands, records RealSense images, and saves each demonstration as an HDF5 file.
 
 ## 1. Install the `tele` Conda Environment
 
@@ -187,4 +187,3 @@ Please consider citing our work if you find this repository useful:
 ## Acknowledgement
 
 We thank the authors of [iDP3 / Humanoid-Teleoperation](https://github.com/YanjieZe/Humanoid-Teleoperation) for their open-source work, which provided valuable reference and inspiration for this project.
-
