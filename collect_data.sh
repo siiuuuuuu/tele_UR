@@ -3,7 +3,7 @@
 
 
 # Edit these settings before collecting data.
-demo_dir="${HOME}/dp_data/new_task1_expertdata"
+demo_dir="${HOME}/dp_data/tast_task1_expertdata"
 ur_host="192.168.3.6"
 workspace_x=(-1.5 1.5)
 workspace_y=(-1.5 1.5)

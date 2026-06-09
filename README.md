@@ -88,6 +88,7 @@ bash collect_data.sh
 
 Keyboard controls:
 
+- Before pressing `s`, align your right hand with the robot end-effector orientation for more intuitive teleoperation.
 - Press `s`: start recording the current episode.
 - Press `s` again: stop recording the current episode.
 - After recording stops, the terminal asks whether to save the data. Enter `y` to save or `n` to discard.
@@ -176,11 +177,16 @@ Replay sends real commands to the robot and hand and asks for confirmation befor
 Please consider citing our work if you find this repository useful:
 
 ```bibtex
-@article{TODO_CITATION_KEY,
-  title   = {TODO_TITLE},
-  author  = {TODO_AUTHORS},
-  journal = {TODO_VENUE},
-  year    = {TODO_YEAR}
+@article{liao2026dexpie,
+  title         = {{DexPIE}: Stable Dexterous Policy Improvement from Real-World Experience},
+  author        = {Liao, Ruizhe and Chen, Wenrui and Zeng, Liangji and Lin, Haoran and Yang, Fan and Yang, Kailun and Wang, Yaonan},
+  journal       = {arXiv preprint arXiv:2606.09615},
+  year          = {2026},
+  doi           = {10.48550/arXiv.2606.09615},
+  url           = {https://arxiv.org/abs/2606.09615},
+  eprint        = {2606.09615},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO}
 }
 ```
 

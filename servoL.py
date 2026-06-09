@@ -78,7 +78,7 @@ def main(args):
             workspace_limits,
             servo_speed=0.005,
             servo_acceleration=0.005,
-            servo_dt=dt/2,
+            servo_dt=dt,
             lookahead_time=0.2,
             gain=500,
         )
@@ -176,6 +176,7 @@ def main(args):
                     time.sleep(sleep_time)
 
             robot.stop_servo() # Stop the servo control thread
+            hand_controller.reset()
             # Save the episode data
             if len(episode)>0:
                 user_choice = input("Save recorded data? (y/n): ").lower().strip()
@@ -196,7 +197,7 @@ def main(args):
                 print("No data to save")
 
             # Return the UR to its initial position for a blocking reset.
-            robot.move_l(initial_pose, 0.3, 0.3)
+            robot.move_l(initial_pose, 0.1, 0.1)
 
             # Check whether to continue after completing an episode
             if keyboard_control.should_stop_collection():

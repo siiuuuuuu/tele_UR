@@ -149,11 +149,20 @@ class InspireHandController:
         self.hand.setangle(*command.tolist())
         return command
 
-    def close(self):
+    def reset(self):
         if self.hand is None:
             return
         try:
             self.hand.reset()
+            print("Inspire hand reset")
+        except Exception as e:
+            print(f"Inspire hand reset failed: {e}")
+
+    def close(self):
+        if self.hand is None:
+            return
+        try:
+            self.reset()
             self.hand.close()
             print("Inspire hand reset and closed")
         except Exception as e:
