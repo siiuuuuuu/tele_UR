@@ -8,6 +8,7 @@ import time
 import h5py
 import numpy as np
 
+from joint_smoother import JointSmoother
 from teleop_interfaces import InspireHandController, URArmInterface
 from tools import MATHTOOLS
 
@@ -20,6 +21,10 @@ DEFAULT_INITIAL_POSE = [0.248, 0.1212, 0.3978, 1.16, 1.25, 1.28]
 DEFAULT_DT = 1.0 / 25.0
 DEFAULT_HAND_PORT = "/dev/ttyUSB0"
 DEFAULT_HAND_BAUDRATE = 115200
+DEFAULT_HAND_RESET_COMMAND = [1000, 1000, 1000, 1000, 1000, 1000]
+DEFAULT_HAND_SMOOTHER_HZ = 100.0
+DEFAULT_HAND_SMOOTHER_W = 25.0
+DEFAULT_HAND_SMOOTHER_Z = 0.8
 
 ARM_ACTION_DIM = 9
 HAND_ACTION_DIM = 6
@@ -81,12 +86,19 @@ def playback_trajectory(args):
     tool = MATHTOOLS()
     robot = None
     hand_controller = None
+    hand_smoother = None
 
     print("Loaded trajectory data:")
     print(f"  Action shape: {action_data.shape}")
     print(f"  Total frames: {len(action_data)}")
     print(f"  Playback speed: {args.speed}x")
     print(f"  Effective frequency: {1 / dt:.2f} Hz")
+    print(
+        "  Hand smoother: "
+        f"{args.hand_smoother_hz:.1f} Hz, "
+        f"w={args.hand_smoother_w:.2f}, "
+        f"z={args.hand_smoother_z:.2f}"
+    )
 
     first_target = arm_action_to_target_pose(tool, action_data[0, :ARM_ACTION_DIM])
     initial_distance = np.linalg.norm(
@@ -109,10 +121,19 @@ def playback_trajectory(args):
             gain=500,
         )
         hand_controller = InspireHandController(args.hand_port, args.hand_baudrate)
+        hand_smoother = JointSmoother(
+            send_callback=hand_controller.apply,
+            hz=args.hand_smoother_hz,
+            w=args.hand_smoother_w,
+            z=args.hand_smoother_z,
+            dim=HAND_ACTION_DIM,
+        )
 
         print(f"Current robot pose: {robot.get_tcp_pose()}")
         print("Moving to initial position")
         robot.move_l(args.initial_pose, 0.3, 0.3)
+        hand_smoother.reset_state(DEFAULT_HAND_RESET_COMMAND)
+        hand_smoother.start()
 
         print("\nStarting trajectory playback")
         print("Press Ctrl+C to stop playback early")
@@ -126,7 +147,12 @@ def playback_trajectory(args):
                 break
 
             target_pose = arm_action_to_target_pose(tool, action[:ARM_ACTION_DIM])
-            hand_controller.apply(action[ARM_ACTION_DIM:ACTION_DIM] * 1000.0)
+            hand_command = np.clip(
+                action[ARM_ACTION_DIM:ACTION_DIM] * 1000.0,
+                0,
+                1000,
+            ).astype(np.float32)
+            hand_smoother.update(hand_command)
             robot.servo(target_pose)
 
             sleep_time = dt - (time.monotonic() - start_time)
@@ -134,6 +160,7 @@ def playback_trajectory(args):
                 time.sleep(sleep_time)
 
         robot.stop_servo()
+        hand_smoother.stop()
         if completed:
             print("\nTrajectory playback completed successfully.")
 
@@ -141,6 +168,8 @@ def playback_trajectory(args):
         print("\nPlayback interrupted by user.")
     finally:
         print("Stopping servo control and disconnecting.")
+        if hand_smoother is not None:
+            hand_smoother.stop()
         if hand_controller is not None:
             hand_controller.close()
         if robot is not None:
@@ -202,6 +231,24 @@ def build_parser():
         "--hand_baudrate",
         type=positive_int,
         default=DEFAULT_HAND_BAUDRATE,
+    )
+    parser.add_argument(
+        "--hand_smoother_hz",
+        type=positive_float,
+        default=DEFAULT_HAND_SMOOTHER_HZ,
+        help="High-frequency sender rate for smoothed hand playback.",
+    )
+    parser.add_argument(
+        "--hand_smoother_w",
+        type=positive_float,
+        default=DEFAULT_HAND_SMOOTHER_W,
+        help="Natural frequency for the 2nd-order hand joint smoother.",
+    )
+    parser.add_argument(
+        "--hand_smoother_z",
+        type=positive_float,
+        default=DEFAULT_HAND_SMOOTHER_Z,
+        help="Damping ratio for the 2nd-order hand joint smoother.",
     )
     parser.add_argument(
         "--max_initial_distance",

@@ -1,5 +1,7 @@
 # tele_UR
 
+[arXiv](https://arxiv.org/abs/2606.09615) | [Project Page](https://siiuuuuuu.github.io/DexPIE/)
+
 This codebase is primarily used for demonstration data collection and also serves as the foundation for human-in-the-loop data collection, so please configure it first. The main entry point is `servoL.py`: it uses an OpenVR tracker to control the UR5 TCP pose, maps MANUS glove data to Inspire hand commands, records RealSense images, and saves each demonstration as an HDF5 file.
 
 ## 1. Install the `tele` Conda Environment
@@ -57,7 +59,7 @@ As shown above, install the Inspire dexterous hand so that its palm normal point
 
 Before collecting data, make sure the following hardware and services are ready:
 
-- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in the `UR_HOST` constant in `servoL.py` and `traj_valid.py`. If jitter is severe, reduce speed to 50%.
+- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in the `UR_HOST` constant in `servoL.py` and `traj_valid.py`. If jitter is severe, reduce speed.
 - UR controller: Connect the computer to the robot controller with an Ethernet cable, either directly or through a LAN switch. Configure both devices on the same IP subnet, and enable Remote Control/RTDE on the robot.
 - Inspire hand: default serial port is `/dev/ttyUSB0`, baud rate `115200`.
 - RealSense cameras: First install the [Intel RealSense SDK (librealsense)](https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md), including its udev rules. Then connect the two cameras; the code uses `front_cam_idx=0` and `right_cam_idx=1` by default, with device serial numbers sorted before indexing.
@@ -92,7 +94,7 @@ Keyboard controls:
 - Press `s`: start recording the current episode.
 - Press `s` again: stop recording the current episode.
 - After recording stops, the terminal asks whether to save the data. Enter `y` to save or `n` to discard.
-- Press `a`: stop the whole collection loop.
+- Press `c`: stop the whole collection loop.
 
 Saved file names use this format:
 

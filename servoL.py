@@ -18,6 +18,7 @@ from termcolor import cprint
 import argparse
 from datetime import datetime
 from SM_inspire_manus_process import inspire_Manus
+from joint_smoother import JointSmoother
 from teleop_interfaces import InspireHandController, URArmInterface
 from tracker_pose_processor import TrackerPoseProcessor
 
@@ -30,6 +31,10 @@ DEFAULT_DT = 1.0 / 25.0
 DEFAULT_MAX_LENGTH = 1000
 DEFAULT_HAND_PORT = "/dev/ttyUSB0"
 DEFAULT_HAND_BAUDRATE = 115200
+DEFAULT_HAND_RESET_COMMAND = [1000, 1000, 1000, 1000, 1000, 1000]
+DEFAULT_HAND_SMOOTHER_HZ = 100.0
+DEFAULT_HAND_SMOOTHER_W = 25.0
+DEFAULT_HAND_SMOOTHER_Z = 0.8
 
 def str2bool(value):
     if isinstance(value, bool):
@@ -93,6 +98,13 @@ def main(args):
     #initialize inspire_Manus
     hand_Manus=inspire_Manus(use_right_hand=True, use_left_hand=False)
     hand_controller=InspireHandController(args.hand_port, args.hand_baudrate)
+    hand_smoother=JointSmoother(
+        send_callback=hand_controller.apply,
+        hz=args.hand_smoother_hz,
+        w=args.hand_smoother_w,
+        z=args.hand_smoother_z,
+        dim=len(DEFAULT_HAND_RESET_COMMAND),
+    )
 
     # initialize realsense
     cam_context=MultiRealSense(use_right_cam=use_wrist_img, front_num_points=20000, 
@@ -100,6 +112,8 @@ def main(args):
 
     hand_Manus.start()
     cam_context.start()
+    hand_smoother.reset_state(DEFAULT_HAND_RESET_COMMAND)
+    hand_smoother.start()
 
     current_pose = robot.get_tcp_pose()
     print(current_pose)
@@ -114,7 +128,7 @@ def main(args):
     v.print_discovered_objects()
 
     print("\n" + "="*50)
-    print("Press 'a' to stop the data collection loop...")
+    print("Press 'c' to stop the data collection loop...")
     print("Press 's' to start recording; press 's' again to stop recording")
     print("="*50 + "\n")
     #time.sleep(1)
@@ -126,7 +140,8 @@ def main(args):
         while not keyboard_control.should_stop_collection():
 
             # Wait for recording while the environment is reset and the operator's hand is aligned.
-            keyboard_control.wait_recording()
+            if not keyboard_control.wait_recording():
+                break
             episode = EpisodeBuffer(use_wrist_img=use_wrist_img)
             tracker_processor.clear_reference()
             print(f"Control frequency set to: {1/dt:.2f} Hz\r")
@@ -155,7 +170,8 @@ def main(args):
                     motion = tracker_processor.compute(current_tracker_mat)
                     hand_action_dict=hand_Manus()
                     hand_action_raw=np.asarray(hand_action_dict['right'], dtype=np.float32)
-                    hand_command=hand_controller.apply(hand_action_raw)
+                    hand_command=np.clip(hand_action_raw, 0, 1000).astype(np.float32)
+                    hand_smoother.update(hand_command)
                     hand_action_array=hand_command.astype(np.float32) / 1000.0
                     arm_action=motion["arm_action"]# Absolute target pose as xyz + 6D rotation
                     action=np.concatenate((arm_action,hand_action_array))
@@ -176,7 +192,9 @@ def main(args):
                     time.sleep(sleep_time)
 
             robot.stop_servo() # Stop the servo control thread
+            hand_smoother.stop()
             hand_controller.reset()
+            hand_smoother.reset_state(DEFAULT_HAND_RESET_COMMAND)
             # Save the episode data
             if len(episode)>0:
                 user_choice = input("Save recorded data? (y/n): ").lower().strip()
@@ -198,6 +216,7 @@ def main(args):
 
             # Return the UR to its initial position for a blocking reset.
             robot.move_l(initial_pose, 0.1, 0.1)
+            hand_smoother.start()
 
             # Check whether to continue after completing an episode
             if keyboard_control.should_stop_collection():
@@ -207,6 +226,7 @@ def main(args):
         keyboard_control.stop()
         cam_context.finalize()
         hand_Manus.finalize()
+        hand_smoother.stop()
         hand_controller.close()
         print("Stopping servo control and disconnecting.\r")
         robot.close(stop_script=False)
@@ -220,6 +240,7 @@ def main(args):
         keyboard_control.stop()
         cam_context.finalize()
         hand_Manus.finalize()
+        hand_smoother.stop()
         hand_controller.close()
         robot.close(stop_script=True)
 
@@ -236,5 +257,8 @@ if __name__ == '__main__':
     parser.add_argument("--max_length", type=positive_int, default=DEFAULT_MAX_LENGTH)
     parser.add_argument("--hand_port", type=str, default=DEFAULT_HAND_PORT)
     parser.add_argument("--hand_baudrate", type=positive_int, default=DEFAULT_HAND_BAUDRATE)
+    parser.add_argument("--hand_smoother_hz", type=positive_float, default=DEFAULT_HAND_SMOOTHER_HZ)
+    parser.add_argument("--hand_smoother_w", type=positive_float, default=DEFAULT_HAND_SMOOTHER_W)
+    parser.add_argument("--hand_smoother_z", type=positive_float, default=DEFAULT_HAND_SMOOTHER_Z)
     args = parser.parse_args()
     main(args)

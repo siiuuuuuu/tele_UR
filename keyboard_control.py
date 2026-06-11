@@ -17,9 +17,9 @@ class KeyboardControl:
         try:
             if hasattr(key, "char") and key.char is not None:
                 k = key.char.lower()
-                if k == "a" and not self.collect_end.is_set():
+                if k == "c" and not self.collect_end.is_set():
                     self.collect_end.set()
-                    print("\n[INFO] 检测到按键 'a'，结束数据采集循环...")
+                    print("\n[INFO] 检测到按键 'c'，结束数据采集循环...")
                 elif k == "s" and not self.recording.is_set():
                     self.recording.set()
                     print("\n[INFO] 检测到按键 's'，开始录制...")
@@ -38,8 +38,10 @@ class KeyboardControl:
         if self.listener.running:
             self.listener.stop()
 
-    def wait_recording(self):
-        self.recording.wait()
+    def wait_recording(self, poll_interval=0.05):
+        while not self.recording.is_set() and not self.collect_end.is_set():
+            self.collect_end.wait(poll_interval)
+        return self.recording.is_set() and not self.collect_end.is_set()
 
     def is_recording(self):
         return self.recording.is_set()
