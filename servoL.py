@@ -29,10 +29,10 @@ DEFAULT_WORKSPACE_Y = [-1.5, 1.5]
 DEFAULT_WORKSPACE_Z = [-0.5, 1.5]
 DEFAULT_INITIAL_POSE = [0.248, 0.1212, 0.3978, 1.16, 1.25, 1.28]
 DEFAULT_DT = 1.0 / 25.0
-DEFAULT_TRACKER_FREQUENCY = 90.0
-DEFAULT_SERVO_FREQUENCY = 125.0
+DEFAULT_TRACKER_FREQUENCY = 60.0
+DEFAULT_SERVO_FREQUENCY = 120.0
 DEFAULT_TRACKER_TIMEOUT = 0.25
-DEFAULT_HAND_FREQUENCY = 120.0
+DEFAULT_HAND_FREQUENCY = 60.0
 DEFAULT_MANUS_TIMEOUT = 0.25
 DEFAULT_HAND_SMOOTHING_OMEGA = 25.0
 DEFAULT_HAND_SMOOTHING_DAMPING = 0.8
@@ -70,6 +70,19 @@ def validate_workspace_limit(axis, limit):
     if limit[0] > limit[1]:
         raise ValueError(f"workspace_{axis} lower bound must be <= upper bound")
     return limit
+
+
+def scalar_int(value, default=-1):
+    if value is None:
+        return default
+    return int(np.asarray(value).item())
+
+
+def scalar_float(value, default=np.nan):
+    if value is None:
+        return default
+    return float(np.asarray(value).item())
+
 
 def main(args):
     # Workspace safety limits (meters)
@@ -125,7 +138,7 @@ def main(args):
     v.print_discovered_objects()
 
     print("\n" + "="*50)
-    print("Press 'a' to stop the data collection loop...")
+    print("Press 'a' to stop the data collection loop, including while waiting for 's'...")
     print("Press 's' to start recording; press 's' again to stop recording")
     print("="*50 + "\n")
     #time.sleep(1)
@@ -155,7 +168,15 @@ def main(args):
         while not keyboard_control.should_stop_collection():
 
             # Wait for recording while the environment is reset and the operator's hand is aligned.
-            keyboard_control.wait_recording()
+            if not keyboard_control.wait_recording():
+                break
+            print("Resetting Inspire hand before recording...\r")
+            #hand_controller.reset(settle_time=0.2)
+            if (
+                keyboard_control.should_stop_collection()
+                or not keyboard_control.is_recording()
+            ):
+                continue
             episode = EpisodeBuffer(use_wrist_img=use_wrist_img)
             arm_controller.start()
             control_workers_running = True
@@ -174,27 +195,88 @@ def main(args):
             print("Recording started. Press 's' to stop recording.\r")    
             step = 0
             try:
-                while step < max_length and keyboard_control.is_recording():
+                while (
+                    step < max_length
+                    and keyboard_control.is_recording()
+                    and not keyboard_control.should_stop_collection()
+                ):
+                    record_start_ns = time.monotonic_ns()
                     start_time = time.monotonic()
                     # Check robot status
                     if robot.is_ready():
                         motion = arm_controller.latest_motion()
+                        t_arm_read_ns = time.monotonic_ns()
                         if motion is None:
                             time.sleep(0.01)
                             continue
                         robot_obs=robot.get_obs()
+                        t_robot_obs_host_ns = time.monotonic_ns()
                         if robot_obs is None:
                             time.sleep(0.01)
                             continue
                         cam_dict=cam_context()
-                        hand_command = hand_control_worker.latest_command()
-                        if hand_command is None:
+                        t_camera_read_ns = time.monotonic_ns()
+                        hand_sample = hand_control_worker.latest_command_sample()
+                        t_hand_read_ns = time.monotonic_ns()
+                        if hand_sample is None:
                             time.sleep(0.01)
                             continue
+                        hand_command = hand_sample["command"]
                         hand_action_array=hand_command.astype(np.float32) / 1000.0
                         arm_action=motion["arm_action"]# Absolute target pose as xyz + 6D rotation
                         action=np.concatenate((arm_action,hand_action_array))
-                        episode.append(robot_obs["state"], cam_dict, action)
+                        front_meta = cam_dict.get("front_meta", {})
+                        wrist_meta = cam_dict.get("right_meta", {})
+                        timestamps = {
+                            "t_record_start_ns": record_start_ns,
+                            "t_arm_read_ns": t_arm_read_ns,
+                            "t_arm_action_host_ns": scalar_int(
+                                motion.get("t_arm_servo_host_ns")
+                            ),
+                            "t_arm_servo_host_ns": scalar_int(
+                                motion.get("t_arm_servo_host_ns")
+                            ),
+                            "t_arm_target_host_ns": scalar_int(
+                                motion.get("t_arm_target_host_ns")
+                            ),
+                            "t_tracker0_host_ns": scalar_int(
+                                motion.get("t_tracker0_host_ns")
+                            ),
+                            "t_tracker1_host_ns": scalar_int(
+                                motion.get("t_tracker1_host_ns")
+                            ),
+                            "t_tracker_latest_host_ns": scalar_int(
+                                motion.get("t_tracker_latest_host_ns")
+                            ),
+                            "interpolation_alpha": scalar_float(
+                                motion.get("interpolation_alpha")
+                            ),
+                            "t_robot_obs_host_ns": t_robot_obs_host_ns,
+                            "t_camera_read_ns": t_camera_read_ns,
+                            "t_front_camera_host_ns": front_meta.get("t_host_ns"),
+                            "front_camera_dev_ts": front_meta.get("t_dev_ts"),
+                            "front_camera_seq": front_meta.get("seq"),
+                            "front_camera_frame_no": front_meta.get("frame_no"),
+                            "t_wrist_camera_host_ns": wrist_meta.get("t_host_ns"),
+                            "wrist_camera_dev_ts": wrist_meta.get("t_dev_ts"),
+                            "wrist_camera_seq": wrist_meta.get("seq"),
+                            "wrist_camera_frame_no": wrist_meta.get("frame_no"),
+                            "t_hand_read_ns": t_hand_read_ns,
+                            "t_hand_command_host_ns": hand_sample.get(
+                                "t_hand_command_host_ns"
+                            ),
+                            "t_manus_sample_host_ns": hand_sample.get(
+                                "t_manus_sample_host_ns"
+                            ),
+                            "manus_seq": hand_sample.get("manus_seq"),
+                        }
+                        timestamps["t_record_end_ns"] = time.monotonic_ns()
+                        episode.append(
+                            robot_obs["state"],
+                            cam_dict,
+                            action,
+                            timestamps,
+                        )
                         step += 1
                     else:
                         print("Robot is stopped (protective or emergency).")
@@ -209,6 +291,9 @@ def main(args):
                 hand_control_worker.stop()
                 arm_controller.stop()
                 control_workers_running = False
+                keyboard_control.clear_recording()
+                print("Resetting Inspire hand after recording...\r")
+                hand_controller.reset(settle_time=0.2)
                 hand_control_worker.raise_if_failed()
                 arm_controller.raise_if_failed()
 

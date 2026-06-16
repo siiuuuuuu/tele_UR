@@ -20,10 +20,18 @@ class KeyboardControl:
                 if k == "a" and not self.collect_end.is_set():
                     self.collect_end.set()
                     print("\n[INFO] 检测到按键 'a'，结束数据采集循环...")
-                elif k == "s" and not self.recording.is_set():
+                elif (
+                    k == "s"
+                    and not self.collect_end.is_set()
+                    and not self.recording.is_set()
+                ):
                     self.recording.set()
                     print("\n[INFO] 检测到按键 's'，开始录制...")
-                elif k == "s" and self.recording.is_set():
+                elif (
+                    k == "s"
+                    and not self.collect_end.is_set()
+                    and self.recording.is_set()
+                ):
                     self.recording.clear()
                     print("\n[INFO] 检测到按键 's'，结束录制...")
         except AttributeError:
@@ -38,11 +46,17 @@ class KeyboardControl:
         if self.listener.running:
             self.listener.stop()
 
-    def wait_recording(self):
-        self.recording.wait()
+    def wait_recording(self, poll_interval=0.05):
+        while not self.collect_end.is_set():
+            if self.recording.wait(poll_interval):
+                return True
+        return False
 
     def is_recording(self):
         return self.recording.is_set()
+
+    def clear_recording(self):
+        self.recording.clear()
 
     def should_stop_collection(self):
         return self.collect_end.is_set()

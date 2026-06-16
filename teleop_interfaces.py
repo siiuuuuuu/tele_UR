@@ -165,11 +165,17 @@ class InspireHandController:
         print("Connecting Inspire hand...")
         self.hand = InspireHand(serial_port, baudrate)
         time.sleep(1)
-        self.hand.reset()
-        time.sleep(1)
+        self.reset(settle_time=1.0)
         self.hand.setpower(500, 500, 500, 500, 500)
         self.hand.setspeed(300, 300, 300, 300, 300)
         print(f"Inspire hand connected: {self.hand.num2str(0x70)}")
+
+    def reset(self, settle_time=0.0):
+        if self.hand is None:
+            return
+        self.hand.reset()
+        if settle_time > 0:
+            time.sleep(settle_time)
 
     def apply(self, raw_action):
         command = np.clip(raw_action, 0, 1000).astype(np.int32)
@@ -180,7 +186,7 @@ class InspireHandController:
         if self.hand is None:
             return
         try:
-            self.hand.reset()
+            self.reset()
             self.hand.close()
             print("Inspire hand reset and closed")
         except Exception as e:

@@ -1,7 +1,9 @@
 """High-rate Vive tracker sampling and UR servo control."""
 
+import math
 import threading
 import time
+from collections import deque
 
 import numpy as np
 
@@ -14,9 +16,10 @@ class HighRateArmController:
         robot,
         tracker_processor,
         tracker_device,
-        tracker_frequency=90.0,
-        servo_frequency=125.0,
+        tracker_frequency=60.0,
+        servo_frequency=120.0,
         tracker_timeout=0.25,
+        interpolation_delay=None,
     ):
         self.robot = robot
         self.tracker_processor = tracker_processor
@@ -31,6 +34,14 @@ class HighRateArmController:
             raise ValueError("servo_frequency must be positive")
         if self.tracker_timeout <= 0:
             raise ValueError("tracker_timeout must be positive")
+
+        self.interpolation_delay = (
+            1.0 / self.tracker_frequency
+            if interpolation_delay is None
+            else float(interpolation_delay)
+        )
+        if self.interpolation_delay < 0:
+            raise ValueError("interpolation_delay must be non-negative")
 
         servo_dt = 1.0 / self.servo_frequency
         if not np.isclose(self.robot.servo_dt, servo_dt, rtol=0.0, atol=1e-9):
@@ -51,8 +62,12 @@ class HighRateArmController:
         self._target_ready = threading.Event()
         self._motion_lock = threading.Lock()
         self._error_lock = threading.Lock()
+        self._tracker_samples = deque(maxlen=8)
+        self._latest_tracker_time = None
+        self._latest_tracker_time_ns = None
         self._latest_motion = None
-        self._latest_target_time = None
+        self._latest_motion_time = None
+        self._latest_motion_time_ns = None
         self._error = None
         self._threads = []
 
@@ -63,8 +78,12 @@ class HighRateArmController:
         self.tracker_processor.clear_reference()
         self._stop_event.clear()
         self._target_ready.clear()
+        self._tracker_samples.clear()
+        self._latest_tracker_time = None
+        self._latest_tracker_time_ns = None
         self._latest_motion = None
-        self._latest_target_time = None
+        self._latest_motion_time = None
+        self._latest_motion_time_ns = None
         self._error = None
 
         self._threads = [
@@ -106,6 +125,13 @@ class HighRateArmController:
                 for key, value in self._latest_motion.items()
             }
 
+    def latest_tracker_motion(self):
+        self.raise_if_failed()
+        with self._motion_lock:
+            if not self._tracker_samples:
+                return None
+            return self._copy_motion(self._tracker_samples[-1][1])
+
     def raise_if_failed(self):
         with self._error_lock:
             error = self._error
@@ -139,12 +165,12 @@ class HighRateArmController:
 
                 motion = self.tracker_processor.compute(tracker_mat)
                 now = time.monotonic()
+                now_ns = time.monotonic_ns()
+                motion["t_tracker_host_ns"] = now_ns
                 with self._motion_lock:
-                    self._latest_motion = {
-                        key: np.asarray(value).copy()
-                        for key, value in motion.items()
-                    }
-                    self._latest_target_time = now
+                    self._tracker_samples.append((now, self._copy_motion(motion)))
+                    self._latest_tracker_time = now
+                    self._latest_tracker_time_ns = now_ns
                 self._target_ready.set()
 
                 if reference_announced:
@@ -161,19 +187,39 @@ class HighRateArmController:
                 return
 
             period_start = self.robot.init_servo_period()
+            now = time.monotonic()
+            now_ns = time.monotonic_ns()
             with self._motion_lock:
-                target_pose = self._latest_motion["target_pose"].copy()
-                target_time = self._latest_target_time
+                samples = list(self._tracker_samples)
+                latest_tracker_time = self._latest_tracker_time
+                latest_tracker_time_ns = self._latest_tracker_time_ns
 
-            target_age = time.monotonic() - target_time
+            if not samples:
+                self.robot.wait_servo_period(period_start)
+                continue
+
+            target_age = now - latest_tracker_time
             if target_age > self.tracker_timeout:
                 raise RuntimeError(
                     f"tracker target is stale ({target_age:.3f}s > "
                     f"{self.tracker_timeout:.3f}s)"
                 )
 
+            target_time = now - self.interpolation_delay
+            motion = self._motion_at(samples, target_time)
+            motion["t_arm_servo_host_ns"] = np.asarray(now_ns, dtype=np.int64)
+            motion["t_tracker_latest_host_ns"] = np.asarray(
+                latest_tracker_time_ns,
+                dtype=np.int64,
+            )
+            target_pose = motion["target_pose"].copy()
+
             if self.robot.servo(target_pose) is False:
                 raise RuntimeError("servoL command was rejected")
+            with self._motion_lock:
+                self._latest_motion = self._copy_motion(motion)
+                self._latest_motion_time = now
+                self._latest_motion_time_ns = now_ns
             self.robot.wait_servo_period(period_start)
 
     def _wait_until_next_tick(self, previous_tick, period):
@@ -185,3 +231,145 @@ class HighRateArmController:
 
         missed_periods = int(-delay // period) + 1
         return next_tick + missed_periods * period
+
+    def _motion_at(self, samples, target_time):
+        if len(samples) == 1 or target_time <= samples[0][0]:
+            return self._with_hold_metadata(samples[0][1])
+        if target_time >= samples[-1][0]:
+            return self._with_hold_metadata(samples[-1][1])
+
+        for sample_index in range(1, len(samples)):
+            t1, motion1 = samples[sample_index]
+            if target_time <= t1:
+                t0, motion0 = samples[sample_index - 1]
+                dt = t1 - t0
+                if dt <= 0:
+                    return self._with_hold_metadata(motion1)
+                alpha = (target_time - t0) / dt
+                alpha = min(max(alpha, 0.0), 1.0)
+                return self._interpolate_motion(motion0, motion1, alpha)
+
+        return self._with_hold_metadata(samples[-1][1])
+
+    def _with_hold_metadata(self, motion):
+        motion = self._copy_motion(motion)
+        tracker_ns = np.asarray(motion["t_tracker_host_ns"], dtype=np.int64)
+        motion["t_arm_target_host_ns"] = tracker_ns.copy()
+        motion["t_tracker0_host_ns"] = tracker_ns.copy()
+        motion["t_tracker1_host_ns"] = tracker_ns.copy()
+        motion["interpolation_alpha"] = np.asarray(0.0, dtype=np.float64)
+        return motion
+
+    def _interpolate_motion(self, motion0, motion1, alpha):
+        result_matrix = self._interpolate_matrix(
+            motion0["result_matrix"],
+            motion1["result_matrix"],
+            alpha,
+        )
+        tool = self.tracker_processor.tool
+        motion = {
+            "result_matrix": result_matrix,
+            "target_pose": np.asarray(tool.mat2xyz_rotvec(result_matrix)),
+            "arm_action": np.asarray(tool.mat2xyz_6drot(result_matrix)),
+        }
+        t0_ns = int(np.asarray(motion0["t_tracker_host_ns"]).item())
+        t1_ns = int(np.asarray(motion1["t_tracker_host_ns"]).item())
+        motion["t_arm_target_host_ns"] = np.asarray(
+            round((1.0 - alpha) * t0_ns + alpha * t1_ns),
+            dtype=np.int64,
+        )
+        motion["t_tracker0_host_ns"] = np.asarray(t0_ns, dtype=np.int64)
+        motion["t_tracker1_host_ns"] = np.asarray(t1_ns, dtype=np.int64)
+        motion["interpolation_alpha"] = np.asarray(alpha, dtype=np.float64)
+        if hasattr(self.tracker_processor, "init_tcp_mat"):
+            motion["increment_matrix"] = np.dot(
+                tool.se3_inverse(self.tracker_processor.init_tcp_mat),
+                result_matrix,
+            )
+        return motion
+
+    def _interpolate_matrix(self, matrix0, matrix1, alpha):
+        matrix0 = np.asarray(matrix0)
+        matrix1 = np.asarray(matrix1)
+        result_matrix = np.eye(4)
+        result_matrix[:3, 3] = (
+            (1.0 - alpha) * matrix0[:3, 3] + alpha * matrix1[:3, 3]
+        )
+        result_matrix[:3, :3] = self._interpolate_rotation(
+            matrix0[:3, :3],
+            matrix1[:3, :3],
+            alpha,
+        )
+        return result_matrix
+
+    @classmethod
+    def _interpolate_rotation(cls, rotation0, rotation1, alpha):
+        rotation0 = cls._project_rotation(rotation0)
+        rotation1 = cls._project_rotation(rotation1)
+        delta_rotation = cls._project_rotation(np.dot(rotation0.T, rotation1))
+        delta_rotvec = cls._rotmat_to_rotvec(delta_rotation)
+        return cls._project_rotation(
+            np.dot(rotation0, cls._rotvec_to_rotmat(alpha * delta_rotvec))
+        )
+
+    @staticmethod
+    def _project_rotation(rotation):
+        u, _, vh = np.linalg.svd(rotation)
+        projected = np.dot(u, vh)
+        if np.linalg.det(projected) < 0:
+            u[:, -1] *= -1
+            projected = np.dot(u, vh)
+        return projected
+
+    @staticmethod
+    def _rotmat_to_rotvec(rotation, eps=1e-9):
+        cos_theta = (np.trace(rotation) - 1.0) / 2.0
+        cos_theta = min(max(cos_theta, -1.0), 1.0)
+        theta = math.acos(cos_theta)
+        if theta < eps:
+            return np.zeros(3)
+
+        if math.pi - theta < 1e-6:
+            diag = np.diag(rotation)
+            axis_index = int(np.argmax(diag))
+            axis = np.asarray(rotation[:, axis_index], dtype=np.float64).copy()
+            axis[axis_index] += 1.0
+            axis_norm = np.linalg.norm(axis)
+            if axis_norm < eps:
+                axis = np.array([1.0, 0.0, 0.0])
+            else:
+                axis = axis / axis_norm
+            return axis * theta
+
+        factor = theta / (2.0 * math.sin(theta))
+        return factor * np.array(
+            [
+                rotation[2, 1] - rotation[1, 2],
+                rotation[0, 2] - rotation[2, 0],
+                rotation[1, 0] - rotation[0, 1],
+            ]
+        )
+
+    @staticmethod
+    def _rotvec_to_rotmat(rotvec, eps=1e-9):
+        theta = np.linalg.norm(rotvec)
+        if theta < eps:
+            return np.eye(3)
+
+        axis = rotvec / theta
+        axis_cross = np.array(
+            [
+                [0.0, -axis[2], axis[1]],
+                [axis[2], 0.0, -axis[0]],
+                [-axis[1], axis[0], 0.0],
+            ]
+        )
+        return (
+            np.eye(3)
+            + math.sin(theta) * axis_cross
+            + (1.0 - math.cos(theta)) * np.dot(axis_cross, axis_cross)
+        )
+
+    @staticmethod
+    def _copy_motion(motion):
+        return {key: np.asarray(value).copy() for key, value in motion.items()}

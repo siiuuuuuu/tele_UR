@@ -132,6 +132,9 @@ class HighRateHandController:
         self._command_lock = threading.Lock()
         self._error_lock = threading.Lock()
         self._latest_command = None
+        self._latest_command_time_ns = None
+        self._latest_manus_sample_time_ns = None
+        self._latest_manus_seq = None
         self._error = None
         self._thread = None
 
@@ -141,6 +144,9 @@ class HighRateHandController:
 
         self._stop_event.clear()
         self._latest_command = None
+        self._latest_command_time_ns = None
+        self._latest_manus_sample_time_ns = None
+        self._latest_manus_seq = None
         self._error = None
         self.smoother.reset()
         self._thread = threading.Thread(
@@ -162,6 +168,18 @@ class HighRateHandController:
             if self._latest_command is None:
                 return None
             return self._latest_command.copy()
+
+    def latest_command_sample(self):
+        self.raise_if_failed()
+        with self._command_lock:
+            if self._latest_command is None:
+                return None
+            return {
+                "command": self._latest_command.copy(),
+                "t_hand_command_host_ns": self._latest_command_time_ns,
+                "t_manus_sample_host_ns": self._latest_manus_sample_time_ns,
+                "manus_seq": self._latest_manus_seq,
+            }
 
     def raise_if_failed(self):
         with self._error_lock:
@@ -201,6 +219,9 @@ class HighRateHandController:
                     )
 
                 self.smoother.update_target(sample["action"])
+                with self._command_lock:
+                    self._latest_manus_sample_time_ns = int(sample["t_host_ns"])
+                    self._latest_manus_seq = int(sample["seq"])
 
             smooth_command = self.smoother.step(period)
             if smooth_command is not None:
@@ -214,6 +235,7 @@ class HighRateHandController:
                     )
                 with self._command_lock:
                     self._latest_command = command.copy()
+                    self._latest_command_time_ns = time.monotonic_ns()
 
             next_tick = self._wait_until_next_tick(next_tick, period)
 
