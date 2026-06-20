@@ -20,6 +20,7 @@ class HighRateArmController:
         servo_frequency=120.0,
         tracker_timeout=0.25,
         interpolation_delay=None,
+        action_history_size=128,
     ):
         self.robot = robot
         self.tracker_processor = tracker_processor
@@ -27,6 +28,7 @@ class HighRateArmController:
         self.tracker_frequency = float(tracker_frequency)
         self.servo_frequency = float(servo_frequency)
         self.tracker_timeout = float(tracker_timeout)
+        self.action_history_size = int(action_history_size)
 
         if self.tracker_frequency <= 0:
             raise ValueError("tracker_frequency must be positive")
@@ -34,6 +36,8 @@ class HighRateArmController:
             raise ValueError("servo_frequency must be positive")
         if self.tracker_timeout <= 0:
             raise ValueError("tracker_timeout must be positive")
+        if self.action_history_size <= 0:
+            raise ValueError("action_history_size must be positive")
 
         self.interpolation_delay = (
             1.0 / self.tracker_frequency
@@ -63,6 +67,7 @@ class HighRateArmController:
         self._motion_lock = threading.Lock()
         self._error_lock = threading.Lock()
         self._tracker_samples = deque(maxlen=8)
+        self._action_history = deque(maxlen=self.action_history_size)
         self._latest_tracker_time = None
         self._latest_tracker_time_ns = None
         self._latest_motion = None
@@ -79,6 +84,7 @@ class HighRateArmController:
         self._stop_event.clear()
         self._target_ready.clear()
         self._tracker_samples.clear()
+        self._action_history.clear()
         self._latest_tracker_time = None
         self._latest_tracker_time_ns = None
         self._latest_motion = None
@@ -124,6 +130,18 @@ class HighRateArmController:
                 key: np.asarray(value).copy()
                 for key, value in self._latest_motion.items()
             }
+
+    def motion_at_time_ns(self, target_time_ns):
+        self.raise_if_failed()
+        with self._motion_lock:
+            if not self._action_history:
+                return None
+            motion = self._nearest_by_time(
+                self._action_history,
+                int(target_time_ns),
+                "t_arm_action_host_ns",
+            )
+            return self._copy_motion(motion)
 
     def latest_tracker_motion(self):
         self.raise_if_failed()
@@ -207,6 +225,7 @@ class HighRateArmController:
 
             target_time = now - self.interpolation_delay
             motion = self._motion_at(samples, target_time)
+            motion["t_arm_action_host_ns"] = np.asarray(now_ns, dtype=np.int64)
             motion["t_arm_servo_host_ns"] = np.asarray(now_ns, dtype=np.int64)
             motion["t_tracker_latest_host_ns"] = np.asarray(
                 latest_tracker_time_ns,
@@ -217,7 +236,9 @@ class HighRateArmController:
             if self.robot.servo(target_pose) is False:
                 raise RuntimeError("servoL command was rejected")
             with self._motion_lock:
-                self._latest_motion = self._copy_motion(motion)
+                copied_motion = self._copy_motion(motion)
+                self._latest_motion = copied_motion
+                self._action_history.append(copied_motion)
                 self._latest_motion_time = now
                 self._latest_motion_time_ns = now_ns
             self.robot.wait_servo_period(period_start)
@@ -373,3 +394,17 @@ class HighRateArmController:
     @staticmethod
     def _copy_motion(motion):
         return {key: np.asarray(value).copy() for key, value in motion.items()}
+
+    @staticmethod
+    def _nearest_by_time(samples, target_time_ns, time_key):
+        samples = list(samples)
+        best_sample = samples[-1]
+        best_delta = abs(int(np.asarray(best_sample[time_key]).item()) - target_time_ns)
+        for sample in reversed(samples[:-1]):
+            delta = abs(int(np.asarray(sample[time_key]).item()) - target_time_ns)
+            if delta < best_delta:
+                best_sample = sample
+                best_delta = delta
+            else:
+                break
+        return best_sample

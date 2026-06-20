@@ -23,7 +23,8 @@ python -m pip install \
   pyserial==3.5 \
   termcolor==2.4.0 \
   tqdm==4.62.3 \
-  imageio==2.35.1
+  imageio==2.35.1 \
+  pyzmq==27.1.0
 ```
 
 After installation, run a basic import check:
@@ -33,7 +34,7 @@ conda activate tele
 
 python - <<'PY'
 import numpy, cv2, pyrealsense2, rtde_control, rtde_receive
-import openvr, h5py, zarr, serial, termcolor, tqdm, imageio
+import openvr, h5py, zarr, serial, termcolor, tqdm, imageio, zmq
 print("tele core imports ok")
 PY
 ```
@@ -57,12 +58,12 @@ As shown above, install the Inspire dexterous hand so that its palm normal point
 
 Before collecting data, make sure the following hardware and services are ready:
 
-- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in `collect_data.sh` and `replay_trajectory.sh`. Teleoperation samples the Vive Tracker at `90 Hz`, sends `servoL` at `125 Hz`, controls the Inspire hand through a second-order smoother at `120 Hz`, and records demonstrations at `25 Hz`. Use `500 Hz` servo control only with an e-Series controller.
+- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in `collect_data.sh` and `replay_trajectory.sh`. The current `collect_data.sh` defaults record demonstrations at `25 Hz` (`dt=0.04`), sample the Vive Tracker at `60 Hz`, send `servoL` at `120 Hz`, read robot state at `125 Hz`, and control the Inspire hand at `120 Hz`.
 - UR controller: Connect the computer to the robot controller with an Ethernet cable, either directly or through a LAN switch. Configure both devices on the same IP subnet, and enable Remote Control/RTDE on the robot.
 - Inspire hand: default serial port is `/dev/ttyUSB0`, baud rate `115200`.
 - RealSense cameras: First install the [Intel RealSense SDK (librealsense)](https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md), including its udev rules. Then connect the two cameras; the code uses `front_cam_idx=0` and `right_cam_idx=1` by default, with device serial numbers sorted before indexing.
 - SteamVR: Set up the Vive Tracker following [Software Setup Tutorial - VIVE Tracker setup](https://docs.google.com/document/d/1ANxSA_PctkqFf3xqAkyktgBgDWEbrFK7b1OnJe54ltw/edit?tab=t.0#heading=h.yxlxo67jgfyx).
-- MANUS glove: First follow the [ManusTele repository](https://github.com/siiuuuuuu/ManusTele) to configure and start the MANUS client. Then connect the client to `localhost:8888`, where `SM_inspire_manus_process.py` listens by default, and stream the glove data.
+- MANUS glove: First follow the ManusTele ZMQ/protobuf publisher setup, then start the publisher on `tcp://127.0.0.1:2044`. `servoL.py` subscribes through `SM_inspire_manus_zmq.py` by default.
 
 Set temporary serial permission:
 
@@ -106,11 +107,13 @@ HDF5 fields:
 - `env_qpos_proprioception`: robot state, `[6 joint + 6 TCP pose]`, shape `[T, 12]`.
 - `action`: action vector, `[absolute target xyz + 6D rotation + 6 hand]`, shape `[T, 15]`.
 
-The high-rate tracker, arm servo, and Inspire hand control loops run
-independently from the `25 Hz` recording loop. Change `tracker_frequency`,
-`servo_frequency`, `tracker_timeout`, `hand_frequency`, and `manus_timeout`
-near the top of `collect_data.sh`; these settings do not change the HDF5
-sampling frequency or fields.
+The high-rate tracker, arm servo, robot-state reader, and Inspire hand control
+loops run independently from the `25 Hz` recording loop. The current defaults
+are `tracker_frequency=60`, `servo_frequency=120`,
+`robot_state_frequency=125`, `hand_frequency=120`,
+`manus_timeout=0.25`, and `manus_zmq_endpoint=tcp://127.0.0.1:2044`.
+Change these settings near the top of `collect_data.sh`; they do not change
+the HDF5 sampling frequency or fields.
 
 The Inspire hand smoother defaults to natural frequency `25 rad/s`, damping
 ratio `0.8`, and input smoothing coefficient `0.6`. Tune
@@ -174,7 +177,7 @@ python fix_h5_success.py /home/lrz/dp_data/offlineRL_data/task1/demo_20260507_11
 python fix_h5_success.py /home/lrz/dp_data/offlineRL_data/task1/demo_20260507_114630.h5 true
 ```
 
-To replay one trajectory on the UR robot and Inspire hand, edit the trajectory path and hardware settings at the top of `replay_trajectory.sh`. Keep them consistent with the settings used during collection, then run:
+To replay one trajectory on the UR robot and Inspire hand, edit the trajectory path and hardware settings at the top of `replay_trajectory.sh`. Keep them consistent with the settings used during collection, including `servo_frequency`, then run:
 
 ```bash
 bash replay_trajectory.sh

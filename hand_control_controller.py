@@ -2,6 +2,7 @@
 
 import threading
 import time
+from collections import deque
 
 import numpy as np
 
@@ -97,16 +98,20 @@ class HighRateHandController:
         smoothing_natural_frequency=25.0,
         smoothing_damping_ratio=0.8,
         smoothing_input_alpha=0.6,
+        command_history_size=128,
     ):
         self.manus_source = manus_source
         self.hand_controller = hand_controller
         self.control_frequency = float(control_frequency)
         self.manus_timeout = float(manus_timeout)
+        self.command_history_size = int(command_history_size)
 
         if self.control_frequency <= 0:
             raise ValueError("control_frequency must be positive")
         if self.manus_timeout <= 0:
             raise ValueError("manus_timeout must be positive")
+        if self.command_history_size <= 0:
+            raise ValueError("command_history_size must be positive")
 
         self.smoother = JointSmoother(
             joint_count=6,
@@ -135,6 +140,7 @@ class HighRateHandController:
         self._latest_command_time_ns = None
         self._latest_manus_sample_time_ns = None
         self._latest_manus_seq = None
+        self._command_history = deque(maxlen=self.command_history_size)
         self._error = None
         self._thread = None
 
@@ -147,6 +153,7 @@ class HighRateHandController:
         self._latest_command_time_ns = None
         self._latest_manus_sample_time_ns = None
         self._latest_manus_seq = None
+        self._command_history.clear()
         self._error = None
         self.smoother.reset()
         self._thread = threading.Thread(
@@ -174,12 +181,19 @@ class HighRateHandController:
         with self._command_lock:
             if self._latest_command is None:
                 return None
-            return {
-                "command": self._latest_command.copy(),
-                "t_hand_command_host_ns": self._latest_command_time_ns,
-                "t_manus_sample_host_ns": self._latest_manus_sample_time_ns,
-                "manus_seq": self._latest_manus_seq,
-            }
+            return self._copy_command_sample(self._command_history[-1])
+
+    def command_at_time_ns(self, target_time_ns):
+        self.raise_if_failed()
+        with self._command_lock:
+            if not self._command_history:
+                return None
+            sample = self._nearest_by_time(
+                self._command_history,
+                int(target_time_ns),
+                "t_hand_command_host_ns",
+            )
+            return self._copy_command_sample(sample)
 
     def raise_if_failed(self):
         with self._error_lock:
@@ -236,6 +250,14 @@ class HighRateHandController:
                 with self._command_lock:
                     self._latest_command = command.copy()
                     self._latest_command_time_ns = time.monotonic_ns()
+                    command_sample = {
+                        "command": command.copy(),
+                        "t_hand_action_host_ns": self._latest_command_time_ns,
+                        "t_hand_command_host_ns": self._latest_command_time_ns,
+                        "t_manus_sample_host_ns": self._latest_manus_sample_time_ns,
+                        "manus_seq": self._latest_manus_seq,
+                    }
+                    self._command_history.append(command_sample)
 
             next_tick = self._wait_until_next_tick(next_tick, period)
 
@@ -248,3 +270,27 @@ class HighRateHandController:
 
         missed_periods = int(-delay // period) + 1
         return next_tick + missed_periods * period
+
+    @staticmethod
+    def _copy_command_sample(sample):
+        return {
+            "command": np.asarray(sample["command"]).copy(),
+            "t_hand_action_host_ns": sample.get("t_hand_action_host_ns"),
+            "t_hand_command_host_ns": sample.get("t_hand_command_host_ns"),
+            "t_manus_sample_host_ns": sample.get("t_manus_sample_host_ns"),
+            "manus_seq": sample.get("manus_seq"),
+        }
+
+    @staticmethod
+    def _nearest_by_time(samples, target_time_ns, time_key):
+        samples = list(samples)
+        best_sample = samples[-1]
+        best_delta = abs(int(best_sample[time_key]) - target_time_ns)
+        for sample in reversed(samples[:-1]):
+            delta = abs(int(sample[time_key]) - target_time_ns)
+            if delta < best_delta:
+                best_sample = sample
+                best_delta = delta
+            else:
+                break
+        return best_sample

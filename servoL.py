@@ -19,7 +19,8 @@ import argparse
 from datetime import datetime
 from arm_servo_controller import HighRateArmController
 from hand_control_controller import HighRateHandController
-from SM_inspire_manus_process import inspire_Manus
+from robot_state_reader import HighRateRobotStateReader
+from SM_inspire_manus_zmq import inspire_Manus
 from teleop_interfaces import InspireHandController, URArmInterface
 from tracker_pose_processor import TrackerPoseProcessor
 
@@ -33,10 +34,18 @@ DEFAULT_TRACKER_FREQUENCY = 60.0
 DEFAULT_SERVO_FREQUENCY = 120.0
 DEFAULT_TRACKER_TIMEOUT = 0.25
 DEFAULT_HAND_FREQUENCY = 60.0
+DEFAULT_ROBOT_STATE_FREQUENCY = 125.0
 DEFAULT_MANUS_TIMEOUT = 0.25
+DEFAULT_MANUS_ZMQ_ENDPOINT = "tcp://127.0.0.1:2044"
+DEFAULT_MANUS_ZMQ_RCVHWM = 1
+DEFAULT_MANUS_ZMQ_CONFLATE = True
+DEFAULT_MANUS_ZMQ_POLL_TIMEOUT_MS = 100
+DEFAULT_MANUS_CONTROL_THRESHOLD = 10.0
+DEFAULT_MANUS_SCALE_FACTOR = 15.0
 DEFAULT_HAND_SMOOTHING_OMEGA = 25.0
 DEFAULT_HAND_SMOOTHING_DAMPING = 0.8
 DEFAULT_HAND_INPUT_ALPHA = 0.6
+DEFAULT_ALIGNMENT_TOLERANCE_MS = 25.0
 DEFAULT_MAX_LENGTH = 1000
 DEFAULT_HAND_PORT = "/dev/ttyUSB0"
 DEFAULT_HAND_BAUDRATE = 115200
@@ -56,6 +65,13 @@ def positive_float(value):
     value = float(value)
     if value <= 0:
         raise argparse.ArgumentTypeError("expected a positive float")
+    return value
+
+
+def nonnegative_float(value):
+    value = float(value)
+    if value < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative float")
     return value
 
 
@@ -82,6 +98,12 @@ def scalar_float(value, default=np.nan):
     if value is None:
         return default
     return float(np.asarray(value).item())
+
+
+def time_delta_ms(value_ns, anchor_ns, default=np.nan):
+    if value_ns is None or anchor_ns is None:
+        return default
+    return (scalar_int(value_ns) - scalar_int(anchor_ns)) / 1e6
 
 
 def main(args):
@@ -115,7 +137,16 @@ def main(args):
     os.makedirs(data_dir, exist_ok=True)
 
     #initialize inspire_Manus
-    hand_Manus=inspire_Manus(use_right_hand=True, use_left_hand=False)
+    hand_Manus = inspire_Manus(
+        use_right_hand=True,
+        use_left_hand=False,
+        zmq_endpoint=args.manus_zmq_endpoint,
+        control_threshold=args.manus_control_threshold,
+        scale_factor=args.manus_scale_factor,
+        rcvhwm=args.manus_zmq_rcvhwm,
+        conflate=args.manus_zmq_conflate,
+        poll_timeout_ms=args.manus_zmq_poll_timeout_ms,
+    )
     hand_controller=InspireHandController(args.hand_port, args.hand_baudrate)
 
     # initialize realsense
@@ -162,6 +193,10 @@ def main(args):
         smoothing_damping_ratio=args.hand_smoothing_damping,
         smoothing_input_alpha=args.hand_input_alpha,
     )
+    robot_state_reader = HighRateRobotStateReader(
+        robot=robot,
+        read_frequency=args.robot_state_frequency,
+    )
     control_workers_running = False
 
     try:
@@ -181,10 +216,13 @@ def main(args):
             arm_controller.start()
             control_workers_running = True
             hand_control_worker.start()
+            robot_state_reader.start()
+            episode_start_ns = time.monotonic_ns()
             print(f"Recording frequency set to: {1/dt:.2f} Hz\r")
             print(f"Tracker frequency set to: {args.tracker_frequency:.2f} Hz\r")
             print(f"Servo frequency set to: {args.servo_frequency:.2f} Hz\r")
             print(f"Hand control frequency set to: {args.hand_frequency:.2f} Hz\r")
+            print(f"Robot state frequency set to: {args.robot_state_frequency:.2f} Hz\r")
             print(
                 "Hand smoother set to: "
                 f"omega={args.hand_smoothing_omega:.2f}, "
@@ -204,35 +242,68 @@ def main(args):
                     start_time = time.monotonic()
                     # Check robot status
                     if robot.is_ready():
-                        motion = arm_controller.latest_motion()
-                        t_arm_read_ns = time.monotonic_ns()
-                        if motion is None:
-                            time.sleep(0.01)
-                            continue
-                        robot_obs=robot.get_obs()
-                        t_robot_obs_host_ns = time.monotonic_ns()
-                        if robot_obs is None:
-                            time.sleep(0.01)
-                            continue
                         cam_dict=cam_context()
                         t_camera_read_ns = time.monotonic_ns()
-                        hand_sample = hand_control_worker.latest_command_sample()
+                        front_meta = cam_dict.get("front_meta", {})
+                        wrist_meta = cam_dict.get("right_meta", {})
+                        t_anchor_ns = front_meta.get("t_host_ns")
+                        if t_anchor_ns is None or t_anchor_ns < episode_start_ns:
+                            time.sleep(0.001)
+                            continue
+
+                        motion = arm_controller.motion_at_time_ns(t_anchor_ns)
+                        t_arm_read_ns = time.monotonic_ns()
+                        if motion is None:
+                            time.sleep(0.001)
+                            continue
+                        robot_obs = robot_state_reader.obs_at_time_ns(t_anchor_ns)
+                        if robot_obs is None:
+                            time.sleep(0.001)
+                            continue
+                        hand_sample = hand_control_worker.command_at_time_ns(t_anchor_ns)
                         t_hand_read_ns = time.monotonic_ns()
                         if hand_sample is None:
-                            time.sleep(0.01)
+                            time.sleep(0.001)
                             continue
+
+                        t_arm_action_ns = scalar_int(
+                            motion.get("t_arm_action_host_ns")
+                        )
+                        t_robot_obs_host_ns = scalar_int(
+                            robot_obs.get("t_robot_obs_host_ns")
+                        )
+                        t_hand_action_ns = scalar_int(
+                            hand_sample.get("t_hand_action_host_ns")
+                        )
+                        arm_sync_delta_ms = time_delta_ms(
+                            t_arm_action_ns,
+                            t_anchor_ns,
+                        )
+                        robot_sync_delta_ms = time_delta_ms(
+                            t_robot_obs_host_ns,
+                            t_anchor_ns,
+                        )
+                        hand_sync_delta_ms = time_delta_ms(
+                            t_hand_action_ns,
+                            t_anchor_ns,
+                        )
+                        if (
+                            abs(arm_sync_delta_ms) > args.alignment_tolerance_ms
+                            or abs(robot_sync_delta_ms) > args.alignment_tolerance_ms
+                            or abs(hand_sync_delta_ms) > args.alignment_tolerance_ms
+                        ):
+                            time.sleep(0.001)
+                            continue
+
                         hand_command = hand_sample["command"]
                         hand_action_array=hand_command.astype(np.float32) / 1000.0
                         arm_action=motion["arm_action"]# Absolute target pose as xyz + 6D rotation
                         action=np.concatenate((arm_action,hand_action_array))
-                        front_meta = cam_dict.get("front_meta", {})
-                        wrist_meta = cam_dict.get("right_meta", {})
                         timestamps = {
                             "t_record_start_ns": record_start_ns,
+                            "t_anchor_ns": t_anchor_ns,
                             "t_arm_read_ns": t_arm_read_ns,
-                            "t_arm_action_host_ns": scalar_int(
-                                motion.get("t_arm_servo_host_ns")
-                            ),
+                            "t_arm_action_host_ns": t_arm_action_ns,
                             "t_arm_servo_host_ns": scalar_int(
                                 motion.get("t_arm_servo_host_ns")
                             ),
@@ -262,6 +333,7 @@ def main(args):
                             "wrist_camera_seq": wrist_meta.get("seq"),
                             "wrist_camera_frame_no": wrist_meta.get("frame_no"),
                             "t_hand_read_ns": t_hand_read_ns,
+                            "t_hand_action_host_ns": t_hand_action_ns,
                             "t_hand_command_host_ns": hand_sample.get(
                                 "t_hand_command_host_ns"
                             ),
@@ -269,6 +341,16 @@ def main(args):
                                 "t_manus_sample_host_ns"
                             ),
                             "manus_seq": hand_sample.get("manus_seq"),
+                            "t_aligned_arm_action_ns": t_arm_action_ns,
+                            "t_aligned_robot_obs_ns": t_robot_obs_host_ns,
+                            "t_aligned_hand_action_ns": t_hand_action_ns,
+                            "sync_delta_arm_action_ms": arm_sync_delta_ms,
+                            "sync_delta_robot_obs_ms": robot_sync_delta_ms,
+                            "sync_delta_hand_action_ms": hand_sync_delta_ms,
+                            "sync_delta_wrist_camera_ms": time_delta_ms(
+                                wrist_meta.get("t_host_ns"),
+                                t_anchor_ns,
+                            ),
                         }
                         timestamps["t_record_end_ns"] = time.monotonic_ns()
                         episode.append(
@@ -290,12 +372,14 @@ def main(args):
             finally:
                 hand_control_worker.stop()
                 arm_controller.stop()
+                robot_state_reader.stop()
                 control_workers_running = False
                 keyboard_control.clear_recording()
                 print("Resetting Inspire hand after recording...\r")
                 hand_controller.reset(settle_time=0.2)
                 hand_control_worker.raise_if_failed()
                 arm_controller.raise_if_failed()
+                robot_state_reader.raise_if_failed()
 
             # Save the episode data
             if len(episode)>0:
@@ -340,6 +424,7 @@ def main(args):
         if control_workers_running:
             hand_control_worker.stop()
             arm_controller.stop()
+            robot_state_reader.stop()
         keyboard_control.stop()
         cam_context.finalize()
         hand_Manus.finalize()
@@ -348,7 +433,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--demo_dir", type=str, default=os.path.expanduser("~/dp_data/new_task1_expertdata"))
+    parser.add_argument("--demo_dir", type=str, default=os.path.expanduser("~/dp_data/test_demo"))
     parser.add_argument("--use_wrist_img", type=str2bool, default=True)
     parser.add_argument("--ur_host", type=str, default=DEFAULT_UR_HOST)
     parser.add_argument("--workspace_x", type=float, nargs=2, default=DEFAULT_WORKSPACE_X, metavar=("MIN", "MAX"))
@@ -360,10 +445,48 @@ if __name__ == '__main__':
     parser.add_argument("--servo_frequency", type=positive_float, default=DEFAULT_SERVO_FREQUENCY)
     parser.add_argument("--tracker_timeout", type=positive_float, default=DEFAULT_TRACKER_TIMEOUT)
     parser.add_argument("--hand_frequency", type=positive_float, default=DEFAULT_HAND_FREQUENCY)
+    parser.add_argument("--robot_state_frequency", type=positive_float, default=DEFAULT_ROBOT_STATE_FREQUENCY)
     parser.add_argument("--manus_timeout", type=positive_float, default=DEFAULT_MANUS_TIMEOUT)
+    parser.add_argument(
+        "--manus_zmq_endpoint",
+        type=str,
+        default=DEFAULT_MANUS_ZMQ_ENDPOINT,
+        help="ZMQ SUB endpoint for MANUS protobuf frames.",
+    )
+    parser.add_argument(
+        "--manus_zmq_rcvhwm",
+        type=positive_int,
+        default=DEFAULT_MANUS_ZMQ_RCVHWM,
+        help="ZMQ receive high-water mark; keep low to avoid stale hand frames.",
+    )
+    parser.add_argument(
+        "--manus_zmq_conflate",
+        type=str2bool,
+        default=DEFAULT_MANUS_ZMQ_CONFLATE,
+        help="Keep only the latest queued ZMQ frame when receiver falls behind.",
+    )
+    parser.add_argument(
+        "--manus_zmq_poll_timeout_ms",
+        type=positive_int,
+        default=DEFAULT_MANUS_ZMQ_POLL_TIMEOUT_MS,
+        help="Receiver thread poll timeout in milliseconds.",
+    )
+    parser.add_argument(
+        "--manus_control_threshold",
+        type=nonnegative_float,
+        default=DEFAULT_MANUS_CONTROL_THRESHOLD,
+        help="Minimum calibrated MANUS motion before updating Inspire command.",
+    )
+    parser.add_argument(
+        "--manus_scale_factor",
+        type=positive_float,
+        default=DEFAULT_MANUS_SCALE_FACTOR,
+        help="Scale factor from MANUS finger-angle deltas to Inspire commands.",
+    )
     parser.add_argument("--hand_smoothing_omega", type=positive_float, default=DEFAULT_HAND_SMOOTHING_OMEGA)
     parser.add_argument("--hand_smoothing_damping", type=positive_float, default=DEFAULT_HAND_SMOOTHING_DAMPING)
     parser.add_argument("--hand_input_alpha", type=positive_float, default=DEFAULT_HAND_INPUT_ALPHA)
+    parser.add_argument("--alignment_tolerance_ms", type=positive_float, default=DEFAULT_ALIGNMENT_TOLERANCE_MS)
     parser.add_argument("--max_length", type=positive_int, default=DEFAULT_MAX_LENGTH)
     parser.add_argument("--hand_port", type=str, default=DEFAULT_HAND_PORT)
     parser.add_argument("--hand_baudrate", type=positive_int, default=DEFAULT_HAND_BAUDRATE)

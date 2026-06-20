@@ -2,6 +2,8 @@
 
 # Edit these settings before merging and converting data with
 # success/intervention metadata.
+# Source H5 files may contain a raw-only "timestamps" group; training Zarr
+# intentionally drops it and keeps only image/state/action/intervention/meta fields.
 demo_dirs=(
   "${HOME}/dp_data/task1_expertdata"
   "${HOME}/dp_data/task1_rollout"

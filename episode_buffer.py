@@ -6,6 +6,7 @@ import numpy as np
 TIMESTAMP_INT_KEYS = (
     "t_record_start_ns",
     "t_record_end_ns",
+    "t_anchor_ns",
     "t_arm_read_ns",
     "t_arm_action_host_ns",
     "t_arm_servo_host_ns",
@@ -22,15 +23,23 @@ TIMESTAMP_INT_KEYS = (
     "wrist_camera_seq",
     "wrist_camera_frame_no",
     "t_hand_read_ns",
+    "t_hand_action_host_ns",
     "t_hand_command_host_ns",
     "t_manus_sample_host_ns",
     "manus_seq",
+    "t_aligned_arm_action_ns",
+    "t_aligned_robot_obs_ns",
+    "t_aligned_hand_action_ns",
 )
 
 TIMESTAMP_FLOAT_KEYS = (
     "interpolation_alpha",
     "front_camera_dev_ts",
     "wrist_camera_dev_ts",
+    "sync_delta_arm_action_ms",
+    "sync_delta_robot_obs_ms",
+    "sync_delta_hand_action_ms",
+    "sync_delta_wrist_camera_ms",
 )
 
 

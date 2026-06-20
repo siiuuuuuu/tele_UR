@@ -9,6 +9,48 @@ from termcolor import cprint
 
 
 DEFAULT_DEMO_DIR = os.path.expanduser("~/dp_data/task1_expertdata")
+RAW_ONLY_H5_KEYS = ("timestamps",)
+TRAINING_OUTPUT_DATA_KEYS = (
+    "img",
+    "wrist_img",
+    "depth",
+    "cloud",
+    "state",
+    "action",
+    "intervention",
+)
+TRAINING_OUTPUT_META_KEYS = ("episode_ends", "success")
+
+
+def report_ignored_raw_only_keys(h5_data, file_name):
+    ignored = [key for key in RAW_ONLY_H5_KEYS if key in h5_data]
+    if ignored:
+        cprint(
+            f"ignore raw-only H5 keys for training conversion in {file_name}: "
+            f"{', '.join(ignored)}",
+            "cyan",
+        )
+
+
+def validate_training_zarr_schema(zarr_data, zarr_meta):
+    data_keys = set(zarr_data.keys())
+    meta_keys = set(zarr_meta.keys())
+    raw_only = set(RAW_ONLY_H5_KEYS)
+
+    leaked_keys = sorted((data_keys | meta_keys) & raw_only)
+    if leaked_keys:
+        raise RuntimeError(
+            "raw-only timestamp fields leaked into training zarr: "
+            + ", ".join(leaked_keys)
+        )
+
+    unexpected_data_keys = sorted(data_keys - set(TRAINING_OUTPUT_DATA_KEYS))
+    unexpected_meta_keys = sorted(meta_keys - set(TRAINING_OUTPUT_META_KEYS))
+    if unexpected_data_keys or unexpected_meta_keys:
+        raise RuntimeError(
+            "unexpected training zarr schema: "
+            f"data={unexpected_data_keys}, meta={unexpected_meta_keys}"
+        )
 
 
 def parse_demo_dirs(args):
@@ -167,6 +209,8 @@ def convert_dataset(args):
             print("process:", file_name)
 
             with h5py.File(file_name, "r") as data:
+                report_ignored_raw_only_keys(data, file_name)
+
                 action_array = np.asarray(data["action"][:], dtype=np.float32)
                 length = action_array.shape[0]
 
@@ -293,6 +337,7 @@ def convert_dataset(args):
 
     zarr_meta.create_dataset('episode_ends', data=episode_ends_arrays, dtype='int64', overwrite=True, compressor=compressor)
     zarr_meta.create_dataset('success', data=success_arrays, dtype='bool', overwrite=True, compressor=compressor)
+    validate_training_zarr_schema(zarr_data, zarr_meta)
     # 包含每个episode结束时的全局索引，用于区分不同episode
     cprint(f'episode nums: {episode_ends_arrays.shape}', 'green')
 

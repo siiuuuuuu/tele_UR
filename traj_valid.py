@@ -18,6 +18,7 @@ DEFAULT_WORKSPACE_Y = [-1.5, 1.5]
 DEFAULT_WORKSPACE_Z = [-0.5, 1.5]
 DEFAULT_INITIAL_POSE = [0.248, 0.1212, 0.3978, 1.16, 1.25, 1.28]
 DEFAULT_DT = 1.0 / 25.0
+DEFAULT_SERVO_FREQUENCY = 25
 DEFAULT_HAND_PORT = "/dev/ttyUSB0"
 DEFAULT_HAND_BAUDRATE = 115200
 
@@ -104,9 +105,10 @@ def playback_trajectory(args):
             workspace_limits,
             servo_speed=0.005,
             servo_acceleration=0.005,
-            servo_dt=dt / 2,
+            servo_dt=1.0 / args.servo_frequency,
             lookahead_time=0.2,
             gain=500,
+            control_frequency=args.servo_frequency,
         )
         hand_controller = InspireHandController(args.hand_port, args.hand_baudrate)
 
@@ -196,6 +198,12 @@ def build_parser():
         type=positive_float,
         default=DEFAULT_DT,
         help="Recording control period before applying --speed.",
+    )
+    parser.add_argument(
+        "--servo_frequency",
+        type=positive_float,
+        default=DEFAULT_SERVO_FREQUENCY,
+        help="RTDE servoL control frequency used during playback.",
     )
     parser.add_argument("--hand_port", default=DEFAULT_HAND_PORT)
     parser.add_argument(

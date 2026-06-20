@@ -16,7 +16,7 @@ FOOTER_HEIGHT = 112
 MARGIN = 20
 PANEL_GAP = 16
 DEFAULT_FPS = 25.0
-DEFAULT_DATA_FOLDER = os.path.expanduser("~/dp_data/new_task1_expertdata")
+DEFAULT_DATA_FOLDER = os.path.expanduser("~/dp_data/test_demo")
 
 COLOR_BACKGROUND = (18, 20, 25)
 COLOR_HEADER = (25, 28, 35)

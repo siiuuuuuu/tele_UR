@@ -2,6 +2,8 @@
 #bash convert_data.sh
 
 # Edit these settings before converting regular teleoperation data.
+# Source H5 files may contain a raw-only "timestamps" group; training Zarr
+# intentionally drops it and keeps only image/state/action/meta fields.
 demo_dir="${HOME}/dp_data/new_task1_expertdata"
 # This directory is overwritten if it already exists.
 save_dir="${HOME}/dp_data/zarr_task1"

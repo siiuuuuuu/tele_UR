@@ -5,13 +5,16 @@
 # Edit these settings before replaying a trajectory on the real robot.
 # Keep the robot, workspace, initial pose, dt, and hand settings consistent
 # with the values used during data collection.
-data_file="${HOME}/dp_data/new_task1_expertdata/demo_YYYYMMDD_HHMMSS.h5"
+data_file="${HOME}/dp_data/test_demo/demo_20260620_135152.h5"
 ur_host="192.168.3.6"
 workspace_x=(-1.0 1.0)
 workspace_y=(-1.0 1.0)
 workspace_z=(0.0 1.0)
 initial_pose=(0.248 0.1212 0.3978 1.16 1.25 1.28)
+# Replay at the trajectory sampling frequency recorded during data collection.
+# For servoL.py's default dt=0.04, this is 25 Hz.
 dt="0.04"
+servo_frequency="25"
 hand_port="/dev/ttyUSB0"
 hand_baudrate="115200"
 speed="1.0"
@@ -28,6 +31,7 @@ python traj_valid.py \
   --workspace_z "${workspace_z[@]}" \
   --initial_pose "${initial_pose[@]}" \
   --dt "${dt}" \
+  --servo_frequency "${servo_frequency}" \
   --hand_port "${hand_port}" \
   --hand_baudrate "${hand_baudrate}" \
   --speed "${speed}" \
