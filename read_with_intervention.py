@@ -328,8 +328,8 @@ def compose_intervention_dashboard(
         1,
     )
     controls = (
-        "Green  Autonomous     Red  Intervention     SPACE  Pause / Resume     "
-        "F / B  +/- 10 frames     R  Restart     N  Next     Q  Quit"
+        "Green  Autonomous     Red  Intervention     SPACE  Pause/Resume     "
+        "F/B  +/-10 frames     R  Restart     P  Previous eps     N  Next eps     Q  Quit"
     )
     dual_viewer._draw_text(
         canvas,
@@ -405,7 +405,7 @@ def play_h5_video(file_path, fps=DEFAULT_FPS):
                 f"{total_frames - int(np.count_nonzero(intervention_data))}/"
                 f"{int(np.count_nonzero(intervention_data))}"
             )
-            print("  Controls: SPACE pause/resume, F/B seek, R restart, N next, Q quit")
+            print("  Controls: SPACE pause/resume, F/B seek, R restart, P previous eps, N next eps, Q quit")
 
             cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(
@@ -445,6 +445,8 @@ def play_h5_video(file_path, fps=DEFAULT_FPS):
 
                 if key == ord("q"):
                     return "quit_all"
+                if key == ord("p"):
+                    return "previous_file"
                 if key == ord("n"):
                     return "next_file"
                 if key == ord(" "):
@@ -517,11 +519,17 @@ def main():
 
     success_count, fail_count, unknown_count = collect_folder_success_stats(h5_files)
 
-    for file_path in h5_files:
+    file_index = 0
+    while file_index < len(h5_files):
+        file_path = h5_files[file_index]
         result = play_h5_video(file_path, fps=args.fps)
         if result == "quit_all":
             print("\nPlayback stopped.")
             break
+        if result == "previous_file":
+            file_index = max(file_index - 1, 0)
+            continue
+        file_index += 1
 
     print("\nFolder success summary:")
     print(f"  Success: {success_count}")

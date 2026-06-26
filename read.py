@@ -16,7 +16,7 @@ FOOTER_HEIGHT = 112
 MARGIN = 20
 PANEL_GAP = 16
 DEFAULT_FPS = 25.0
-DEFAULT_DATA_FOLDER = os.path.expanduser("~/dp_data/test_demo")
+DEFAULT_DATA_FOLDER = os.path.expanduser("~/dp_data/task3_demo")
 
 COLOR_BACKGROUND = (18, 20, 25)
 COLOR_HEADER = (25, 28, 35)
@@ -286,7 +286,10 @@ def compose_dashboard(
     )
     _draw_text(canvas, playback_info, (MARGIN, footer_y + 57), 0.56, COLOR_TEXT, 1)
 
-    controls = "SPACE  Pause / Resume     F / B  +/- 10 frames     R  Restart     N  Next file     Q  Quit"
+    controls = (
+        "SPACE  Pause/Resume     F/B  +/-10 frames     R  Restart     "
+        "P  Previous eps     N  Next eps     Q  Quit"
+    )
     _draw_text(canvas, controls, (MARGIN, footer_y + 91), 0.48, COLOR_MUTED, 1)
     return canvas
 
@@ -326,7 +329,7 @@ def play_h5_video(file_path, fps=DEFAULT_FPS):
             print(f"  color: {front_data.shape}")
             print(f"  wrist_color: {None if wrist_data is None else wrist_data.shape}")
             print(f"  synchronized frames: {total_frames}")
-            print("  Controls: SPACE pause/resume, F/B seek, R restart, N next, Q quit")
+            print("  Controls: SPACE pause/resume, F/B seek, R restart, P previous eps, N next eps, Q quit")
 
             cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(WINDOW_NAME, WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -360,6 +363,8 @@ def play_h5_video(file_path, fps=DEFAULT_FPS):
 
                 if key == ord("q"):
                     return "quit_all"
+                if key == ord("p"):
+                    return "previous_file"
                 if key == ord("n"):
                     return "next_file"
                 if key == ord(" "):
@@ -427,11 +432,17 @@ def main():
     for index, file_path in enumerate(h5_files, start=1):
         print(f"  {index}. {os.path.basename(file_path)}")
 
-    for file_path in h5_files:
+    file_index = 0
+    while file_index < len(h5_files):
+        file_path = h5_files[file_index]
         result = play_h5_video(file_path, fps=args.fps)
         if result == "quit_all":
             print("\nPlayback stopped.")
             break
+        if result == "previous_file":
+            file_index = max(file_index - 1, 0)
+            continue
+        file_index += 1
 
     print("Playback finished.")
 

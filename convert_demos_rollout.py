@@ -146,6 +146,7 @@ def convert_dataset(args):
     save_wrist_img = bool(args.save_wrist_img)
     save_depth = bool(args.save_depth)
     save_cloud = bool(args.save_cloud)
+    default_intervention = bool(args.default_intervention)
 
     # create dir to save demonstrations
     if os.path.exists(save_dir):
@@ -224,8 +225,10 @@ def convert_dataset(args):
                 if "intervention" in data:
                     intervention_array = np.asarray(data["intervention"][:], dtype=bool)
                 else:
-                    # 遥操数据不记录干预时，按时间维默认全为专家干预
-                    intervention_array = np.ones((length,), dtype=bool)
+                    # H5 缺失 intervention 时，使用命令行指定的默认标签。
+                    intervention_array = np.full(
+                        (length,), default_intervention, dtype=bool
+                    )
 
                 # 统一成 (T,) 的每步干预标记，避免和 action 维度绑定导致后续 stack 失败
                 if intervention_array.ndim == 0:
@@ -381,6 +384,8 @@ if __name__ == "__main__":
     parser.add_argument("--save_wrist_img", type=int, default=1) # 是否保存手腕相机图像
     parser.add_argument("--save_depth", type=int, default=0)
     parser.add_argument("--save_cloud", type=int, default=0)
+    parser.add_argument("--default_intervention", type=int, choices=(0, 1), default=0,
+                        help="Value for H5 files without intervention: 0=non-intervention, 1=intervention")
 
     args = parser.parse_args()
 

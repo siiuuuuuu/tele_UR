@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-# Edit these settings before merging and converting data with
-# success/intervention metadata.
+# Edit these settings before merging and converting rollout/demo data.
 # Source H5 files may contain a raw-only "timestamps" group; training Zarr
 # intentionally drops it and keeps only image/state/action/intervention/meta fields.
 demo_dirs=(
@@ -15,6 +14,8 @@ save_img="1"
 save_wrist_img="1"
 save_depth="0"
 save_cloud="0"
+# Value for H5 files without an "intervention" dataset: 0=non-intervention, 1=intervention.
+default_intervention="0"
 
 python convert_demos_rollout.py \
   --demo_dirs "${demo_dirs[@]}" \
@@ -22,4 +23,5 @@ python convert_demos_rollout.py \
   --save_img "${save_img}" \
   --save_wrist_img "${save_wrist_img}" \
   --save_depth "${save_depth}" \
-  --save_cloud "${save_cloud}"
+  --save_cloud "${save_cloud}" \
+  --default_intervention "${default_intervention}"

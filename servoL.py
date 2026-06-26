@@ -7,7 +7,6 @@ Modified version: Uses RTDE interface with servoL for smooth teleoperation
 
 import time
 import sys
-import numpy as np
 import triad_openvr
 from episode_buffer import EpisodeBuffer
 from keyboard_control import KeyboardControl
@@ -23,6 +22,11 @@ from robot_state_reader import HighRateRobotStateReader
 from SM_inspire_manus_zmq import inspire_Manus
 from teleop_interfaces import InspireHandController, URArmInterface
 from tracker_pose_processor import TrackerPoseProcessor
+from teleop_recording import (
+    AlignedSampleProvider,
+    TeleopRuntime,
+    TimestampBuilder,
+)
 
 DEFAULT_UR_HOST = "192.168.3.6" 
 DEFAULT_WORKSPACE_X = [-1.5, 1.5]
@@ -46,6 +50,9 @@ DEFAULT_HAND_SMOOTHING_OMEGA = 25.0
 DEFAULT_HAND_SMOOTHING_DAMPING = 0.8
 DEFAULT_HAND_INPUT_ALPHA = 0.6
 DEFAULT_ALIGNMENT_TOLERANCE_MS = 25.0
+DEFAULT_FRONT_CAMERA_FPS = 30
+DEFAULT_WRIST_CAMERA_FPS = 60
+DEFAULT_CAMERA_SYNC_WAIT_TIMEOUT_MS = 5
 DEFAULT_MAX_LENGTH = 1000
 DEFAULT_HAND_PORT = "/dev/ttyUSB0"
 DEFAULT_HAND_BAUDRATE = 115200
@@ -88,24 +95,6 @@ def validate_workspace_limit(axis, limit):
     return limit
 
 
-def scalar_int(value, default=-1):
-    if value is None:
-        return default
-    return int(np.asarray(value).item())
-
-
-def scalar_float(value, default=np.nan):
-    if value is None:
-        return default
-    return float(np.asarray(value).item())
-
-
-def time_delta_ms(value_ns, anchor_ns, default=np.nan):
-    if value_ns is None or anchor_ns is None:
-        return default
-    return (scalar_int(value_ns) - scalar_int(anchor_ns)) / 1e6
-
-
 def main(args):
     # Workspace safety limits (meters)
     workspace_limits = {
@@ -113,7 +102,6 @@ def main(args):
         'y': validate_workspace_limit("y", args.workspace_y),
         'z': validate_workspace_limit("z", args.workspace_z),
     }
-    dt = args.dt              
     tool=MATHTOOLS()
     max_length=args.max_length
     # Initialize RTDE connection
@@ -150,8 +138,14 @@ def main(args):
     hand_controller=InspireHandController(args.hand_port, args.hand_baudrate)
 
     # initialize realsense
+    front_camera_fps = args.camera_fps or args.front_camera_fps
+    wrist_camera_fps = args.camera_fps or args.wrist_camera_fps
     cam_context=MultiRealSense(use_right_cam=use_wrist_img, front_num_points=20000, 
-                         use_grid_sampling=True, use_crop=False,img_size=256)
+                         use_grid_sampling=True, use_crop=False,img_size=256,
+                         front_camera_fps=front_camera_fps,
+                         wrist_camera_fps=wrist_camera_fps,
+                         sync_right_to_front=True,
+                         sync_wait_timeout_ms=args.camera_sync_wait_timeout_ms)
 
     hand_Manus.start()
     cam_context.start()
@@ -197,7 +191,26 @@ def main(args):
         robot=robot,
         read_frequency=args.robot_state_frequency,
     )
-    control_workers_running = False
+    runtime = TeleopRuntime(
+        robot=robot,
+        camera=cam_context,
+        hand_manus=hand_Manus,
+        hand_controller=hand_controller,
+        keyboard_control=keyboard_control,
+        arm_controller=arm_controller,
+        hand_control_worker=hand_control_worker,
+        robot_state_reader=robot_state_reader,
+    )
+    sample_provider = AlignedSampleProvider(
+        camera=cam_context,
+        arm_controller=arm_controller,
+        hand_control_worker=hand_control_worker,
+        robot_state_reader=robot_state_reader,
+        use_wrist_img=use_wrist_img,
+        alignment_tolerance_ms=args.alignment_tolerance_ms,
+        timestamp_builder=TimestampBuilder(),
+    )
+    closed_normally = False
 
     try:
         while not keyboard_control.should_stop_collection():
@@ -213,12 +226,15 @@ def main(args):
             ):
                 continue
             episode = EpisodeBuffer(use_wrist_img=use_wrist_img)
-            arm_controller.start()
-            control_workers_running = True
-            hand_control_worker.start()
-            robot_state_reader.start()
+            runtime.start_episode_workers()
+            sample_provider.reset_episode()
             episode_start_ns = time.monotonic_ns()
-            print(f"Recording frequency set to: {1/dt:.2f} Hz\r")
+            print(
+                "Recording paced by front camera: "
+                f"{front_camera_fps:.2f} Hz\r"
+            )
+            if use_wrist_img:
+                print(f"Wrist camera frequency set to: {wrist_camera_fps:.2f} Hz\r")
             print(f"Tracker frequency set to: {args.tracker_frequency:.2f} Hz\r")
             print(f"Servo frequency set to: {args.servo_frequency:.2f} Hz\r")
             print(f"Hand control frequency set to: {args.hand_frequency:.2f} Hz\r")
@@ -238,148 +254,25 @@ def main(args):
                     and keyboard_control.is_recording()
                     and not keyboard_control.should_stop_collection()
                 ):
-                    record_start_ns = time.monotonic_ns()
-                    start_time = time.monotonic()
                     # Check robot status
                     if robot.is_ready():
-                        cam_dict=cam_context()
-                        t_camera_read_ns = time.monotonic_ns()
-                        front_meta = cam_dict.get("front_meta", {})
-                        wrist_meta = cam_dict.get("right_meta", {})
-                        t_anchor_ns = front_meta.get("t_host_ns")
-                        if t_anchor_ns is None or t_anchor_ns < episode_start_ns:
+                        sample = sample_provider.read(episode_start_ns)
+                        if sample is None:
                             time.sleep(0.001)
                             continue
 
-                        motion = arm_controller.motion_at_time_ns(t_anchor_ns)
-                        t_arm_read_ns = time.monotonic_ns()
-                        if motion is None:
-                            time.sleep(0.001)
-                            continue
-                        robot_obs = robot_state_reader.obs_at_time_ns(t_anchor_ns)
-                        if robot_obs is None:
-                            time.sleep(0.001)
-                            continue
-                        hand_sample = hand_control_worker.command_at_time_ns(t_anchor_ns)
-                        t_hand_read_ns = time.monotonic_ns()
-                        if hand_sample is None:
-                            time.sleep(0.001)
-                            continue
-
-                        t_arm_action_ns = scalar_int(
-                            motion.get("t_arm_action_host_ns")
-                        )
-                        t_robot_obs_host_ns = scalar_int(
-                            robot_obs.get("t_robot_obs_host_ns")
-                        )
-                        t_hand_action_ns = scalar_int(
-                            hand_sample.get("t_hand_action_host_ns")
-                        )
-                        arm_sync_delta_ms = time_delta_ms(
-                            t_arm_action_ns,
-                            t_anchor_ns,
-                        )
-                        robot_sync_delta_ms = time_delta_ms(
-                            t_robot_obs_host_ns,
-                            t_anchor_ns,
-                        )
-                        hand_sync_delta_ms = time_delta_ms(
-                            t_hand_action_ns,
-                            t_anchor_ns,
-                        )
-                        if (
-                            abs(arm_sync_delta_ms) > args.alignment_tolerance_ms
-                            or abs(robot_sync_delta_ms) > args.alignment_tolerance_ms
-                            or abs(hand_sync_delta_ms) > args.alignment_tolerance_ms
-                        ):
-                            time.sleep(0.001)
-                            continue
-
-                        hand_command = hand_sample["command"]
-                        hand_action_array=hand_command.astype(np.float32) / 1000.0
-                        arm_action=motion["arm_action"]# Absolute target pose as xyz + 6D rotation
-                        action=np.concatenate((arm_action,hand_action_array))
-                        timestamps = {
-                            "t_record_start_ns": record_start_ns,
-                            "t_anchor_ns": t_anchor_ns,
-                            "t_arm_read_ns": t_arm_read_ns,
-                            "t_arm_action_host_ns": t_arm_action_ns,
-                            "t_arm_servo_host_ns": scalar_int(
-                                motion.get("t_arm_servo_host_ns")
-                            ),
-                            "t_arm_target_host_ns": scalar_int(
-                                motion.get("t_arm_target_host_ns")
-                            ),
-                            "t_tracker0_host_ns": scalar_int(
-                                motion.get("t_tracker0_host_ns")
-                            ),
-                            "t_tracker1_host_ns": scalar_int(
-                                motion.get("t_tracker1_host_ns")
-                            ),
-                            "t_tracker_latest_host_ns": scalar_int(
-                                motion.get("t_tracker_latest_host_ns")
-                            ),
-                            "interpolation_alpha": scalar_float(
-                                motion.get("interpolation_alpha")
-                            ),
-                            "t_robot_obs_host_ns": t_robot_obs_host_ns,
-                            "t_camera_read_ns": t_camera_read_ns,
-                            "t_front_camera_host_ns": front_meta.get("t_host_ns"),
-                            "front_camera_dev_ts": front_meta.get("t_dev_ts"),
-                            "front_camera_seq": front_meta.get("seq"),
-                            "front_camera_frame_no": front_meta.get("frame_no"),
-                            "t_wrist_camera_host_ns": wrist_meta.get("t_host_ns"),
-                            "wrist_camera_dev_ts": wrist_meta.get("t_dev_ts"),
-                            "wrist_camera_seq": wrist_meta.get("seq"),
-                            "wrist_camera_frame_no": wrist_meta.get("frame_no"),
-                            "t_hand_read_ns": t_hand_read_ns,
-                            "t_hand_action_host_ns": t_hand_action_ns,
-                            "t_hand_command_host_ns": hand_sample.get(
-                                "t_hand_command_host_ns"
-                            ),
-                            "t_manus_sample_host_ns": hand_sample.get(
-                                "t_manus_sample_host_ns"
-                            ),
-                            "manus_seq": hand_sample.get("manus_seq"),
-                            "t_aligned_arm_action_ns": t_arm_action_ns,
-                            "t_aligned_robot_obs_ns": t_robot_obs_host_ns,
-                            "t_aligned_hand_action_ns": t_hand_action_ns,
-                            "sync_delta_arm_action_ms": arm_sync_delta_ms,
-                            "sync_delta_robot_obs_ms": robot_sync_delta_ms,
-                            "sync_delta_hand_action_ms": hand_sync_delta_ms,
-                            "sync_delta_wrist_camera_ms": time_delta_ms(
-                                wrist_meta.get("t_host_ns"),
-                                t_anchor_ns,
-                            ),
-                        }
-                        timestamps["t_record_end_ns"] = time.monotonic_ns()
                         episode.append(
-                            robot_obs["state"],
-                            cam_dict,
-                            action,
-                            timestamps,
+                            sample.robot_state,
+                            sample.cam_dict,
+                            sample.action,
+                            sample.timestamps,
                         )
                         step += 1
                     else:
                         print("Robot is stopped (protective or emergency).")
                         break # Exit loop
-
-                    # Maintain the recording loop frequency
-                    elapsed = time.monotonic() - start_time
-                    sleep_time = dt - elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
             finally:
-                hand_control_worker.stop()
-                arm_controller.stop()
-                robot_state_reader.stop()
-                control_workers_running = False
-                keyboard_control.clear_recording()
-                print("Resetting Inspire hand after recording...\r")
-                hand_controller.reset(settle_time=0.2)
-                hand_control_worker.raise_if_failed()
-                arm_controller.raise_if_failed()
-                robot_state_reader.raise_if_failed()
+                runtime.stop_episode_workers()
 
             # Save the episode data
             if len(episode)>0:
@@ -408,28 +301,18 @@ def main(args):
                 break
 
         print("collecting completed.\r")
-        keyboard_control.stop()
-        cam_context.finalize()
-        hand_Manus.finalize()
-        hand_controller.close()
         print("Stopping servo control and disconnecting.\r")
-        robot.close(stop_script=False)
+        runtime.close(stop_script=False)
+        closed_normally = True
 
     except KeyboardInterrupt:
         print("\nKeyboard interrupt detected. Stopping control.")
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
-        print("Stopping servo control and disconnecting.")
-        if control_workers_running:
-            hand_control_worker.stop()
-            arm_controller.stop()
-            robot_state_reader.stop()
-        keyboard_control.stop()
-        cam_context.finalize()
-        hand_Manus.finalize()
-        hand_controller.close()
-        robot.close(stop_script=True)
+        if not closed_normally:
+            print("Stopping servo control and disconnecting.")
+            runtime.close(stop_script=True)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -440,7 +323,15 @@ if __name__ == '__main__':
     parser.add_argument("--workspace_y", type=float, nargs=2, default=DEFAULT_WORKSPACE_Y, metavar=("MIN", "MAX"))
     parser.add_argument("--workspace_z", type=float, nargs=2, default=DEFAULT_WORKSPACE_Z, metavar=("MIN", "MAX"))
     parser.add_argument("--initial_pose", type=float, nargs=6, default=DEFAULT_INITIAL_POSE, metavar=("X", "Y", "Z", "RX", "RY", "RZ"))
-    parser.add_argument("--dt", type=positive_float, default=DEFAULT_DT)
+    parser.add_argument(
+        "--dt",
+        type=positive_float,
+        default=DEFAULT_DT,
+        help=(
+            "Legacy timer period. Recording is paced by the front camera; "
+            "this value is kept for script compatibility."
+        ),
+    )
     parser.add_argument("--tracker_frequency", type=positive_float, default=DEFAULT_TRACKER_FREQUENCY)
     parser.add_argument("--servo_frequency", type=positive_float, default=DEFAULT_SERVO_FREQUENCY)
     parser.add_argument("--tracker_timeout", type=positive_float, default=DEFAULT_TRACKER_TIMEOUT)
@@ -487,6 +378,11 @@ if __name__ == '__main__':
     parser.add_argument("--hand_smoothing_damping", type=positive_float, default=DEFAULT_HAND_SMOOTHING_DAMPING)
     parser.add_argument("--hand_input_alpha", type=positive_float, default=DEFAULT_HAND_INPUT_ALPHA)
     parser.add_argument("--alignment_tolerance_ms", type=positive_float, default=DEFAULT_ALIGNMENT_TOLERANCE_MS)
+    parser.add_argument("--front_camera_fps", type=positive_int, default=DEFAULT_FRONT_CAMERA_FPS)
+    parser.add_argument("--wrist_camera_fps", type=positive_int, default=DEFAULT_WRIST_CAMERA_FPS)
+    parser.add_argument("--camera_fps", type=positive_int, default=None,
+                        help="Legacy option: set both front and wrist camera FPS to the same value.")
+    parser.add_argument("--camera_sync_wait_timeout_ms", type=nonnegative_float, default=DEFAULT_CAMERA_SYNC_WAIT_TIMEOUT_MS)
     parser.add_argument("--max_length", type=positive_int, default=DEFAULT_MAX_LENGTH)
     parser.add_argument("--hand_port", type=str, default=DEFAULT_HAND_PORT)
     parser.add_argument("--hand_baudrate", type=positive_int, default=DEFAULT_HAND_BAUDRATE)
