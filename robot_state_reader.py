@@ -56,6 +56,13 @@ class HighRateRobotStateReader:
                 return None
             return self._copy_obs(self._latest_obs)
 
+    def latest_obs_time_ns(self):
+        self.raise_if_failed()
+        with self._state_lock:
+            if self._latest_obs is None:
+                return None
+            return int(np.asarray(self._latest_obs["t_robot_obs_host_ns"]).item())
+
     def obs_at_time_ns(self, target_time_ns):
         self.raise_if_failed()
         with self._state_lock:

@@ -37,7 +37,8 @@ DEFAULT_DT = 1.0 / 25.0
 DEFAULT_TRACKER_FREQUENCY = 60.0
 DEFAULT_SERVO_FREQUENCY = 120.0
 DEFAULT_TRACKER_TIMEOUT = 0.25
-DEFAULT_HAND_FREQUENCY = 60.0
+DEFAULT_INTERPOLATION_DELAY = None
+DEFAULT_HAND_FREQUENCY = 120.0
 DEFAULT_ROBOT_STATE_FREQUENCY = 125.0
 DEFAULT_MANUS_TIMEOUT = 0.25
 DEFAULT_MANUS_ZMQ_ENDPOINT = "tcp://127.0.0.1:2044"
@@ -50,6 +51,7 @@ DEFAULT_HAND_SMOOTHING_OMEGA = 25.0
 DEFAULT_HAND_SMOOTHING_DAMPING = 0.8
 DEFAULT_HAND_INPUT_ALPHA = 0.6
 DEFAULT_ALIGNMENT_TOLERANCE_MS = 25.0
+DEFAULT_HISTORY_WAIT_TIMEOUT_MS = 5.0
 DEFAULT_FRONT_CAMERA_FPS = 30
 DEFAULT_WRIST_CAMERA_FPS = 60
 DEFAULT_CAMERA_SYNC_WAIT_TIMEOUT_MS = 5
@@ -177,6 +179,7 @@ def main(args):
         tracker_frequency=args.tracker_frequency,
         servo_frequency=args.servo_frequency,
         tracker_timeout=args.tracker_timeout,
+        interpolation_delay=args.interpolation_delay,
     )
     hand_control_worker = HighRateHandController(
         manus_source=hand_Manus,
@@ -209,6 +212,7 @@ def main(args):
         use_wrist_img=use_wrist_img,
         alignment_tolerance_ms=args.alignment_tolerance_ms,
         timestamp_builder=TimestampBuilder(),
+        history_wait_timeout_ms=args.history_wait_timeout_ms,
     )
     closed_normally = False
 
@@ -235,10 +239,25 @@ def main(args):
             )
             if use_wrist_img:
                 print(f"Wrist camera frequency set to: {wrist_camera_fps:.2f} Hz\r")
+            print(
+                "Camera timestamp source: SENSOR_TIMESTAMP mapped to host "
+                "monotonic time via RealSense global_time\r"
+            )
             print(f"Tracker frequency set to: {args.tracker_frequency:.2f} Hz\r")
             print(f"Servo frequency set to: {args.servo_frequency:.2f} Hz\r")
+            if args.interpolation_delay is None:
+                print("Interpolation delay set to: auto (1 tracker period)\r")
+            else:
+                print(
+                    "Interpolation delay set to: "
+                    f"{args.interpolation_delay * 1000.0:.2f} ms\r"
+                )
             print(f"Hand control frequency set to: {args.hand_frequency:.2f} Hz\r")
             print(f"Robot state frequency set to: {args.robot_state_frequency:.2f} Hz\r")
+            print(
+                "History wait timeout set to: "
+                f"{args.history_wait_timeout_ms:.2f} ms\r"
+            )
             print(
                 "Hand smoother set to: "
                 f"omega={args.hand_smoothing_omega:.2f}, "
@@ -335,6 +354,16 @@ if __name__ == '__main__':
     parser.add_argument("--tracker_frequency", type=positive_float, default=DEFAULT_TRACKER_FREQUENCY)
     parser.add_argument("--servo_frequency", type=positive_float, default=DEFAULT_SERVO_FREQUENCY)
     parser.add_argument("--tracker_timeout", type=positive_float, default=DEFAULT_TRACKER_TIMEOUT)
+    parser.add_argument(
+        "--interpolation_delay",
+        type=nonnegative_float,
+        default=DEFAULT_INTERPOLATION_DELAY,
+        help=(
+            "Seconds to look back when interpolating tracker targets. "
+            "Use 0 to follow the latest tracker sample without delay; "
+            "omit for one tracker period."
+        ),
+    )
     parser.add_argument("--hand_frequency", type=positive_float, default=DEFAULT_HAND_FREQUENCY)
     parser.add_argument("--robot_state_frequency", type=positive_float, default=DEFAULT_ROBOT_STATE_FREQUENCY)
     parser.add_argument("--manus_timeout", type=positive_float, default=DEFAULT_MANUS_TIMEOUT)
@@ -378,6 +407,7 @@ if __name__ == '__main__':
     parser.add_argument("--hand_smoothing_damping", type=positive_float, default=DEFAULT_HAND_SMOOTHING_DAMPING)
     parser.add_argument("--hand_input_alpha", type=positive_float, default=DEFAULT_HAND_INPUT_ALPHA)
     parser.add_argument("--alignment_tolerance_ms", type=positive_float, default=DEFAULT_ALIGNMENT_TOLERANCE_MS)
+    parser.add_argument("--history_wait_timeout_ms", type=nonnegative_float, default=DEFAULT_HISTORY_WAIT_TIMEOUT_MS)
     parser.add_argument("--front_camera_fps", type=positive_int, default=DEFAULT_FRONT_CAMERA_FPS)
     parser.add_argument("--wrist_camera_fps", type=positive_int, default=DEFAULT_WRIST_CAMERA_FPS)
     parser.add_argument("--camera_fps", type=positive_int, default=None,

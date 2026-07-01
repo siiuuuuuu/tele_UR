@@ -183,6 +183,11 @@ class HighRateHandController:
                 return None
             return self._copy_command_sample(self._command_history[-1])
 
+    def latest_command_time_ns(self):
+        self.raise_if_failed()
+        with self._command_lock:
+            return self._latest_command_time_ns
+
     def command_at_time_ns(self, target_time_ns):
         self.raise_if_failed()
         with self._command_lock:

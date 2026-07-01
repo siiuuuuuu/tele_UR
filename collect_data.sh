@@ -13,6 +13,7 @@ dt="0.04"
 tracker_frequency="80"
 servo_frequency="120"
 tracker_timeout="0.25"
+interpolation_delay="0.008"
 hand_frequency="120"
 robot_state_frequency="125"
 manus_timeout="0.25"
@@ -22,10 +23,11 @@ manus_zmq_conflate="true"
 manus_zmq_poll_timeout_ms="100"
 manus_control_threshold="10"
 manus_scale_factor="15"
-hand_smoothing_omega="25"
-hand_smoothing_damping="0.8"
-hand_input_alpha="0.6"
+hand_smoothing_omega="30"
+hand_smoothing_damping="0.85"
+hand_input_alpha="0.84"
 alignment_tolerance_ms="25"
+history_wait_timeout_ms="3"
 front_camera_fps="30"
 wrist_camera_fps="60"
 camera_sync_wait_timeout_ms="5"
@@ -47,6 +49,7 @@ python servoL.py \
   --tracker_frequency "${tracker_frequency}" \
   --servo_frequency "${servo_frequency}" \
   --tracker_timeout "${tracker_timeout}" \
+  --interpolation_delay "${interpolation_delay}" \
   --hand_frequency "${hand_frequency}" \
   --robot_state_frequency "${robot_state_frequency}" \
   --manus_timeout "${manus_timeout}" \
@@ -60,6 +63,7 @@ python servoL.py \
   --hand_smoothing_damping "${hand_smoothing_damping}" \
   --hand_input_alpha "${hand_input_alpha}" \
   --alignment_tolerance_ms "${alignment_tolerance_ms}" \
+  --history_wait_timeout_ms "${history_wait_timeout_ms}" \
   --front_camera_fps "${front_camera_fps}" \
   --wrist_camera_fps "${wrist_camera_fps}" \
   --camera_sync_wait_timeout_ms "${camera_sync_wait_timeout_ms}" \

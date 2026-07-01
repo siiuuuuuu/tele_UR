@@ -131,6 +131,11 @@ class HighRateArmController:
                 for key, value in self._latest_motion.items()
             }
 
+    def latest_action_time_ns(self):
+        self.raise_if_failed()
+        with self._motion_lock:
+            return self._latest_motion_time_ns
+
     def motion_at_time_ns(self, target_time_ns):
         self.raise_if_failed()
         with self._motion_lock:

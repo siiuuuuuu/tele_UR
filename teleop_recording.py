@@ -86,11 +86,41 @@ class TimestampBuilder:
             "t_robot_obs_host_ns": aligned.t_robot_obs_host_ns,
             "t_camera_read_ns": aligned.t_camera_read_ns,
             "t_front_camera_host_ns": aligned.front_meta.get("t_host_ns"),
+            "t_front_camera_receive_host_ns": aligned.front_meta.get(
+                "t_receive_host_ns"
+            ),
             "front_camera_dev_ts": aligned.front_meta.get("t_dev_ts"),
+            "front_camera_sensor_timestamp_us": aligned.front_meta.get(
+                "sensor_timestamp_us"
+            ),
+            "front_camera_frame_global_mono_ns": aligned.front_meta.get(
+                "frame_global_mono_ns"
+            ),
+            "front_camera_timestamp_fit_residual_ms": aligned.front_meta.get(
+                "timestamp_fit_residual_ms"
+            ),
+            "front_camera_receive_minus_image_ms": aligned.front_meta.get(
+                "receive_minus_image_ms"
+            ),
             "front_camera_seq": aligned.front_meta.get("seq"),
             "front_camera_frame_no": aligned.front_meta.get("frame_no"),
             "t_wrist_camera_host_ns": aligned.wrist_meta.get("t_host_ns"),
+            "t_wrist_camera_receive_host_ns": aligned.wrist_meta.get(
+                "t_receive_host_ns"
+            ),
             "wrist_camera_dev_ts": aligned.wrist_meta.get("t_dev_ts"),
+            "wrist_camera_sensor_timestamp_us": aligned.wrist_meta.get(
+                "sensor_timestamp_us"
+            ),
+            "wrist_camera_frame_global_mono_ns": aligned.wrist_meta.get(
+                "frame_global_mono_ns"
+            ),
+            "wrist_camera_timestamp_fit_residual_ms": aligned.wrist_meta.get(
+                "timestamp_fit_residual_ms"
+            ),
+            "wrist_camera_receive_minus_image_ms": aligned.wrist_meta.get(
+                "receive_minus_image_ms"
+            ),
             "wrist_camera_seq": aligned.wrist_meta.get("seq"),
             "wrist_camera_frame_no": aligned.wrist_meta.get("frame_no"),
             "t_hand_read_ns": aligned.t_hand_read_ns,
@@ -128,6 +158,8 @@ class AlignedSampleProvider:
         front_skip_warning_interval_s=2.0,
         camera_paced=True,
         camera_frame_timeout_ms=None,
+        history_wait_timeout_ms=5.0,
+        history_wait_sleep_s=0.0005,
     ):
         self.camera = camera
         self.arm_controller = arm_controller
@@ -138,6 +170,8 @@ class AlignedSampleProvider:
         self.timestamp_builder = timestamp_builder or TimestampBuilder()
         self.camera_paced = bool(camera_paced)
         self.camera_frame_timeout_ms = camera_frame_timeout_ms
+        self.history_wait_timeout_ms = max(0.0, float(history_wait_timeout_ms))
+        self.history_wait_sleep_s = max(0.0, float(history_wait_sleep_s))
         self.wrist_stale_warning_interval_ns = int(
             wrist_stale_warning_interval_s * 1e9
         )
@@ -168,6 +202,8 @@ class AlignedSampleProvider:
         t_anchor_ns = front_meta.get("t_host_ns")
         if t_anchor_ns is None or t_anchor_ns < episode_start_ns:
             return None
+
+        self._wait_histories_cover_anchor(t_anchor_ns)
 
         motion = self.arm_controller.motion_at_time_ns(t_anchor_ns)
         t_arm_read_ns = time.monotonic_ns()
@@ -293,6 +329,35 @@ class AlignedSampleProvider:
                 f"({previous_seq} -> {front_seq}).\r"
             )
             self.last_front_skip_warn_ns = now_ns
+
+    def _wait_histories_cover_anchor(self, t_anchor_ns):
+        if self.history_wait_timeout_ms <= 0.0:
+            return False
+
+        t_anchor_ns = int(t_anchor_ns)
+        deadline_ns = time.monotonic_ns() + int(
+            self.history_wait_timeout_ms * 1e6
+        )
+        while time.monotonic_ns() < deadline_ns:
+            if self._histories_cover_anchor(t_anchor_ns):
+                return True
+            time.sleep(self.history_wait_sleep_s)
+
+        return self._histories_cover_anchor(t_anchor_ns)
+
+    def _histories_cover_anchor(self, t_anchor_ns):
+        arm_time_ns = self.arm_controller.latest_action_time_ns()
+        robot_time_ns = self.robot_state_reader.latest_obs_time_ns()
+        hand_time_ns = self.hand_control_worker.latest_command_time_ns()
+        return (
+            self._covers_anchor(arm_time_ns, t_anchor_ns)
+            and self._covers_anchor(robot_time_ns, t_anchor_ns)
+            and self._covers_anchor(hand_time_ns, t_anchor_ns)
+        )
+
+    @staticmethod
+    def _covers_anchor(latest_time_ns, t_anchor_ns):
+        return latest_time_ns is not None and int(latest_time_ns) >= t_anchor_ns
 
 
 class TeleopRuntime:
