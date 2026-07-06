@@ -51,6 +51,9 @@ def validate_training_zarr_schema(zarr_data, zarr_meta):
 def convert_dataset(args):
     demo_dir = args.demo_dir
     save_dir = args.save_dir
+    action_offset_frames = int(args.action_offset_frames)
+    if action_offset_frames < 0:
+        raise ValueError("--action_offset_frames must be >= 0")
     
     save_img = args.save_img
     save_wrist_img = args.save_wrist_img
@@ -87,6 +90,8 @@ def convert_dataset(args):
     success_arrays = []
     intervention_arrays = []
     
+    skipped_short_episodes = 0
+
     for demo_file in demo_files:
         # load file (h5)
         file_name = os.path.join(demo_dir, demo_file)
@@ -107,18 +112,47 @@ def convert_dataset(args):
 
             action_array = data["action"][:]
             proprioception_array = data["env_qpos_proprioception"][:]
-                
-                
-            # to list
-            length = len(action_array)
+
+            lengths = [len(action_array), len(proprioception_array)]
             if save_img:
+                lengths.append(len(color_array))
+            if save_wrist_img:
+                lengths.append(len(wrist_color_array))
+            if save_depth:
+                lengths.append(len(depth_array))
+            if save_cloud:
+                lengths.append(len(cloud_array))
+
+            raw_length = min(lengths)
+            length = raw_length - action_offset_frames
+            if length <= 0:
+                skipped_short_episodes += 1
+                cprint(
+                    f"skip {file_name}: raw length {raw_length} <= "
+                    f"action offset {action_offset_frames}",
+                    "yellow",
+                )
+                continue
+
+            obs_slice = slice(0, length)
+            action_slice = slice(action_offset_frames, action_offset_frames + length)
+
+            if save_img:
+                color_array = color_array[obs_slice]
                 color_array = [color_array[i] for i in range(length)]
             if save_wrist_img:
+                wrist_color_array = wrist_color_array[obs_slice]
                 wrist_color_array = [wrist_color_array[i] for i in range(length)]
               
             if save_depth:
+                depth_array = depth_array[obs_slice]
                 depth_array = [depth_array[i] for i in range(length)]
-               
+            if save_cloud:
+                cloud_array = cloud_array[obs_slice]
+
+            proprioception_array = proprioception_array[obs_slice]
+            action_array = action_array[action_slice]
+
             proprioception_array = [proprioception_array[i] for i in range(length)]
             action_array = [action_array[i] for i in range(length)]
          
@@ -138,11 +172,17 @@ def convert_dataset(args):
         action_arrays.extend(action_array)
         episode_ends_arrays.append(total_count)
 
+    if total_count == 0:
+        raise RuntimeError(
+            "no usable frames found; check demo_dir and --action_offset_frames"
+        )
+
     ###############################
     # save data
     ###############################
     # create zarr file
     zarr_root = zarr.group(save_dir)
+    zarr_root.attrs["action_offset_frames"] = action_offset_frames
     zarr_data = zarr_root.create_group('data')
     zarr_meta = zarr_root.create_group('meta')
     # save img, state, action arrays into data, and episode ends arrays into meta
@@ -193,6 +233,9 @@ def convert_dataset(args):
     validate_training_zarr_schema(zarr_data, zarr_meta)
     #包含每个episode结束时的全局索引，用于区分不同episode
     cprint(f'episode nums: {episode_ends_arrays.shape}', 'green')
+    cprint(f'action offset frames: +{action_offset_frames}', 'green')
+    if skipped_short_episodes:
+        cprint(f'skipped short episodes: {skipped_short_episodes}', 'yellow')
 
     # print shape
     if save_img:
@@ -222,6 +265,15 @@ if __name__ == "__main__":
     parser.add_argument("--save_wrist_img", type=int, default=1)#是否保存手腕相机图像
     parser.add_argument("--save_depth", type=int, default=0)
     parser.add_argument("--save_cloud", type=int, default=0)
+    parser.add_argument(
+        "--action_offset_frames",
+        type=int,
+        default=0,
+        help=(
+            "Use future action labels inside each episode: obs/state/image[i] -> "
+            "action[i + offset]. The last offset frames of each episode are dropped."
+        ),
+    )
     
     args = parser.parse_args()
     
