@@ -12,7 +12,7 @@ workspace_y=(-1.0 1.0)
 workspace_z=(0.0 1.0)
 initial_pose=(0.248 0.1212 0.3978 1.16 1.25 1.28)
 # Replay at the trajectory sampling frequency recorded during data collection.
-# dt=0.0167 is about 60 Hz.
+# dt=0.0333 is about 30 Hz.
 dt="0.0336"
 servo_frequency="30"
 hand_port="/dev/ttyUSB0"

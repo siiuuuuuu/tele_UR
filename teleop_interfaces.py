@@ -113,7 +113,7 @@ class URArmInterface:
         servo_pose = target_pose
         if not self._is_pose_safe(target_pose):
             servo_pose = self._clip_pose(target_pose)
-            print("Target out of workspace! Stopping servo.")
+            print("Target out of workspace; clipping it to workspace limits.")
 
         return self.rtde_c.servoL(
             servo_pose,

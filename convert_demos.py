@@ -1,5 +1,6 @@
 import os
 import argparse
+import shutil
 import pickle
 import numpy as np
 import random
@@ -85,17 +86,15 @@ def convert_dataset(args):
     
     # create dir to save demonstrations
     if os.path.exists(save_dir):
-        cprint('Data already exists at {}'.format(save_dir), 'red')
-        cprint("If you want to overwrite, delete the existing directory first.", "red")
-        cprint("Do you want to overwrite? (y/n)", "red")
-        # user_input = input()
-        user_input = 'y'
-        if user_input == 'y':
-            cprint('Overwriting {}'.format(save_dir), 'red')
-            os.system('rm -rf {}'.format(save_dir))
+        if not args.overwrite:
+            raise FileExistsError(
+                f"output already exists: {save_dir}; pass --overwrite to replace it"
+            )
+        cprint('Overwriting {}'.format(save_dir), 'red')
+        if os.path.isdir(save_dir):
+            shutil.rmtree(save_dir)
         else:
-            cprint('Exiting', 'red')
-            return
+            os.remove(save_dir)
     os.makedirs(save_dir, exist_ok=True)
     
     demo_files = [f for f in os.listdir(demo_dir) if f.endswith(".h5")]
@@ -320,14 +319,21 @@ if __name__ == "__main__":
     parser.add_argument("--save_depth", type=int, default=0)
     parser.add_argument("--save_cloud", type=int, default=0)
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace save_dir if it already exists.",
+    )
+    parser.add_argument(
         "--action_offset_frames",
         type=int,
-        default=0,
+        default=1,
         help=(
             "Additional conversion-time future action labels inside each episode: "
             "obs/state/image[i] -> action[i + offset]. The last offset frames "
             "of each episode are dropped. This is added to any recorded "
-            "action_alignment_offset_frames stored in the source H5 files."
+            "action_alignment_offset_frames stored in the source H5 files. "
+            "Default: 1 frame, compensating the measured RealSense image-time "
+            "offset."
         ),
     )
     parser.add_argument(

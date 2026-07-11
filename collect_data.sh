@@ -28,6 +28,9 @@ hand_smoothing_damping="0.85"
 hand_input_alpha="0.84"
 alignment_tolerance_ms="25"
 history_wait_timeout_ms="3"
+# Record arm/hand actions nearest to this many front-camera frames after each
+# observation anchor. Use 0 to align actions to the same camera frame.
+action_alignment_offset_frames="0"
 front_camera_fps="30"
 wrist_camera_fps="60"
 camera_sync_wait_timeout_ms="5"
@@ -64,6 +67,7 @@ python servoL.py \
   --hand_input_alpha "${hand_input_alpha}" \
   --alignment_tolerance_ms "${alignment_tolerance_ms}" \
   --history_wait_timeout_ms "${history_wait_timeout_ms}" \
+  --action_alignment_offset_frames "${action_alignment_offset_frames}" \
   --front_camera_fps "${front_camera_fps}" \
   --wrist_camera_fps "${wrist_camera_fps}" \
   --camera_sync_wait_timeout_ms "${camera_sync_wait_timeout_ms}" \

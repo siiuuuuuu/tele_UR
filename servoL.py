@@ -258,8 +258,8 @@ def main(args):
             if use_wrist_img:
                 print(f"Wrist camera frequency set to: {wrist_camera_fps:.2f} Hz\r")
             print(
-                "Camera timestamp source: SENSOR_TIMESTAMP mapped to host "
-                "monotonic time via RealSense global_time\r"
+                "Camera timestamp source: RealSense get_timestamp() in the "
+                "global-time domain, mapped to host monotonic time\r"
             )
             print(f"Tracker frequency set to: {args.tracker_frequency:.2f} Hz\r")
             print(f"Servo frequency set to: {args.servo_frequency:.2f} Hz\r")

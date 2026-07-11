@@ -1,5 +1,9 @@
 # tele_UR
 
+[![Project Page](https://img.shields.io/badge/Project-Page-2f80c1?style=flat-square)](https://siiuuuuuu.github.io/DexPIE/)
+[![arXiv](https://img.shields.io/badge/arXiv-2606.09615-b31b1b?style=flat-square)](https://arxiv.org/abs/2606.09615)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+
 Teleoperation data collection code based on UR RTDE `servoL`. The main entry point is `servoL.py`: it uses an OpenVR tracker to control the UR5 TCP pose, maps MANUS glove data to Inspire hand commands, records RealSense images, and saves each demonstration as an HDF5 file.
 
 ## 1. Install the `tele` Conda Environment
@@ -58,7 +62,7 @@ As shown above, install the Inspire dexterous hand so that its palm normal point
 
 Before collecting data, make sure the following hardware and services are ready:
 
-- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in `collect_data.sh` and `replay_trajectory.sh`. The current `collect_data.sh` defaults record demonstrations at `25 Hz` (`dt=0.04`), sample the Vive Tracker at `60 Hz`, send `servoL` at `120 Hz`, read robot state at `125 Hz`, and control the Inspire hand at `120 Hz`.
+- UR5 robot: the code connects to `192.168.3.6` by default. Configure this in `collect_data.sh` and `replay_trajectory.sh`. The current collection frequencies and alignment settings are described below.
 - UR controller: Connect the computer to the robot controller with an Ethernet cable, either directly or through a LAN switch. Configure both devices on the same IP subnet, and enable Remote Control/RTDE on the robot.
 - Inspire hand: default serial port is `/dev/ttyUSB0`, baud rate `115200`.
 - RealSense cameras: First install the [Intel RealSense SDK (librealsense)](https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md), including its udev rules. Then connect the two cameras; the code uses `front_cam_idx=0` and `right_cam_idx=1` by default, with device serial numbers sorted before indexing.
@@ -72,6 +76,52 @@ sudo chmod 666 /dev/ttyUSB0
 ```
 
 If RealSense devices cannot be enumerated, install librealsense/udev rules first, then reconnect the cameras.
+
+## 3. Runtime Architecture and Time Alignment
+
+Robot control and data recording run at different rates. The current
+`collect_data.sh` configuration is:
+
+| Component | Current setting |
+| --- | ---: |
+| Front camera and HDF5 recording pace | 30 Hz |
+| Wrist camera | 60 Hz |
+| Vive Tracker sampling | 80 Hz |
+| UR `servoL` control | 120 Hz |
+| Robot-state sampling | 125 Hz |
+| MANUS glove ZMQ receive | Publisher-driven; not rate-limited locally |
+| Inspire hand control | 120 Hz |
+| Tracker interpolation delay | 12.5 ms |
+| Cross-stream alignment tolerance | 25 ms |
+| History wait timeout | 3 ms |
+| Hand smoother `(omega, damping, input alpha)` | `(30, 0.85, 0.84)` |
+
+The tracker, arm servo, robot-state reader, MANUS receiver, and hand-control
+loops run independently from recording. Recording is paced by each new front
+camera frame. The `dt` argument is retained for compatibility but no longer
+sets the HDF5 sampling frequency.
+
+The MANUS receive rate is determined by the external ZMQ/protobuf publisher,
+not by `hand_frequency`. The receiver consumes packets as they arrive and uses
+`RCVHWM=1` with `CONFLATE` enabled to retain the latest frame instead of
+building a stale queue. `hand_frequency=120` is the separate rate at which the
+latest smoothed command is sent to the Inspire hand.
+
+Each recorded sample uses the front-camera image timestamp as `t_anchor`:
+
+1. RealSense global time is enabled, and the color frame's `get_timestamp()`
+   value is mapped into the host monotonic clock domain.
+2. The front image, nearest wrist image, and nearest robot state are aligned to
+   `t_anchor`.
+3. Arm and hand actions are aligned to
+   `t_action_anchor = t_anchor + action_alignment_offset_frames / front_camera_fps`.
+4. A sample is skipped when the wrist image, arm action, robot state, or hand
+   action exceeds `alignment_tolerance_ms` from its intended anchor.
+
+The default collection-time `action_alignment_offset_frames` is `0`, so raw
+HDF5 files retain actions nearest to the same front-camera anchor. The
+additional one-frame compensation used for training is applied during HDF5 to
+Zarr conversion, as described in Section 6.
 
 ## 4. Collect Demonstrations
 
@@ -106,21 +156,58 @@ HDF5 fields:
 - `wrist_color`: wrist camera RGB image, present when `use_wrist_img` is enabled.
 - `env_qpos_proprioception`: robot state, `[6 joint + 6 TCP pose]`, shape `[T, 12]`.
 - `action`: action vector, `[absolute target xyz + 6D rotation + 6 hand]`, shape `[T, 15]`.
+- `timestamps/`: raw timing and alignment diagnostics, with one value per frame.
 
-The high-rate tracker, arm servo, robot-state reader, and Inspire hand control
-loops run independently from the `25 Hz` recording loop. The current defaults
-are `tracker_frequency=60`, `servo_frequency=120`,
-`robot_state_frequency=125`, `hand_frequency=120`,
-`manus_timeout=0.25`, and `manus_zmq_endpoint=tcp://127.0.0.1:2044`.
-Change these settings near the top of `collect_data.sh`; they do not change
-the HDF5 sampling frequency or fields.
+The `timestamps/` group contains these categories:
 
-The Inspire hand smoother defaults to natural frequency `25 rad/s`, damping
-ratio `0.8`, and input smoothing coefficient `0.6`. Tune
-`hand_smoothing_omega`, `hand_smoothing_damping`, and `hand_input_alpha` in
-`collect_data.sh`.
+- front/wrist camera reported image time, receive time, frame number, and sequence;
+- tracker target, interpolation, arm action, and UR servo times;
+- robot observation, MANUS sample, and Inspire hand command times;
+- synchronization deltas relative to the observation and action anchors.
 
-## 5. Convert HDF5 to Zarr
+Each HDF5 file also records the attributes `action_alignment_policy`,
+`action_alignment_offset_frames`, `action_alignment_offset_seconds`,
+`front_camera_fps`, and `wrist_camera_fps`.
+
+## 5. Measure RealSense Image-Time Offset
+
+`measure_realsense_screen_flash_latency.py` estimates the offset between the
+RealSense-reported timestamp and the image content by filming a black/white
+flashing window. Run it from a graphical desktop session:
+
+```bash
+conda activate tele
+bash run_realsense_screen_flash_latency.sh
+
+# Optional: longer measurement in a window
+bash run_realsense_screen_flash_latency.sh --duration_s 30 --windowed
+```
+
+Point the RealSense color camera at the flashing window. The launcher writes
+frame, display-event, camera-edge, and matched-edge CSV files under
+`realsense_latency_results/`. The report separates:
+
+- reported image timestamp minus display-toggle application time;
+- Python receive time minus display-toggle application time;
+- Python receive time minus the reported image timestamp.
+
+For the current cameras and 30 Hz configuration, the measured image-content
+time indicates that the true exposure corresponding to an image is about one
+frame earlier than the timestamp currently used for alignment:
+
+```text
+t_exposure ~= t_reported - 1 / camera_fps
+```
+
+At 30 Hz this is approximately 33.3 ms. The measured exposure duration itself
+is small relative to a frame, but that estimate is less reliable because the
+screen method also includes monitor scanout, pixel response, threshold/ROI
+selection, and other measurement errors. Therefore the repository treats the
+one-frame offset as an empirical training-label compensation, not a precise
+hardware exposure calibration. Re-run the measurement after changing the
+camera model, resolution, frame rate, exposure mode, or display setup.
+
+## 6. Convert HDF5 to Zarr
 
 For regular teleoperation data, edit the input directory, output directory, and saved observation types at the top of `convert_data.sh`. Then run:
 
@@ -134,9 +221,53 @@ For data with `success` / `intervention` metadata, or when merging multiple dire
 bash convert_rollout_data.sh
 ```
 
-Note: the conversion scripts overwrite `save_dir` if it already exists.
+Training conversion defaults to a one-frame future action label:
 
-## 6. Inspect Data and Replay Trajectories
+```text
+observation[i] -> action[i + 1]
+```
+
+For rollout data, `intervention[i + 1]` stays aligned with the shifted action.
+The final frame of each episode is dropped because it has no `action[i + 1]`.
+This compensates the approximately one-frame image-time offset measured in
+Section 5. Set `action_offset_frames=0` in the shell script, or pass
+`--action_offset_frames 0` directly, to disable the compensation.
+
+There are two distinct offsets:
+
+| Offset | Applied at | Default | Meaning |
+| --- | --- | ---: | --- |
+| `action_alignment_offset_frames` | HDF5 collection | 0 | Select control history relative to the front-camera anchor |
+| `action_offset_frames` | Zarr conversion | 1 | Shift the training action/intervention index into the future |
+
+The Zarr root stores `recorded_action_offset_frames`,
+`action_index_offset_frames`, and their sum as `action_offset_frames`. Source
+HDF5 files with different recorded offsets cannot be merged without an
+explicit override.
+
+To compare other future-label offsets, use:
+
+```bash
+# Generate +1, +2, and +3 regular datasets
+bash convert_data_action_offset.sh
+
+# Generate only +2
+bash convert_data_action_offset.sh 2
+
+# Rollout/expert equivalents
+bash convert_rollout_data_action_offset.sh
+bash convert_rollout_data_action_offset.sh 2
+```
+
+The raw HDF5 `timestamps/` diagnostics are intentionally not copied into the
+training Zarr. Regular demonstration conversion marks all episodes successful;
+rollout conversion reads `success` and `intervention` when present.
+
+The provided shell scripts pass `--overwrite` and replace an existing
+`save_dir`. Direct Python invocation refuses to replace an existing output
+unless `--overwrite` is supplied.
+
+## 7. Inspect Data and Replay Trajectories
 
 Play the `color` and `wrist_color` camera streams:
 
@@ -155,7 +286,7 @@ python read_with_intervention.py ~/dp_data/offlineRL_data/new_task1_iter1
 Both scripts accept either an individual HDF5 file or a directory. Use `--fps` to change the playback frame rate and `--pattern` to change the file glob used for a directory:
 
 ```bash
-python read.py ~/dp_data/new_task1_expertdata/demo_YYYYMMDD_HHMMSS.h5 --fps 25
+python read.py ~/dp_data/new_task1_expertdata/demo_YYYYMMDD_HHMMSS.h5 --fps 30
 python read_with_intervention.py ~/dp_data/offlineRL_data/new_task1_iter1 --pattern 'demo_*.h5'
 ```
 
@@ -185,19 +316,36 @@ bash replay_trajectory.sh
 
 Replay sends real commands to the robot and hand and asks for confirmation before starting. Verify the workspace, emergency stop, initial pose, and surrounding environment. The script rejects trajectories whose first recorded target exceeds the configured `max_initial_distance`.
 
+Playback supports a speed multiplier, per-frame TCP tracking errors, summary
+statistics, and optional CSV output. `replay_trajectory.sh` currently writes a
+`*_replay_tracking_error.csv` file by default. The summary reports mean, p95,
+and maximum position and rotation-vector errors. Set
+`print_tracking_error=true` in the shell script to print every frame, or leave
+`tracking_error_csv` empty to disable CSV output. Playback also stops when a UR
+protective stop or emergency stop is detected.
+
 ## BibTeX
 
 Please consider citing our work if you find this repository useful:
 
 ```bibtex
-@article{TODO_CITATION_KEY,
-  title   = {TODO_TITLE},
-  author  = {TODO_AUTHORS},
-  journal = {TODO_VENUE},
-  year    = {TODO_YEAR}
+@article{liao2026dexpie,
+  title         = {{DexPIE}: Stable Dexterous Policy Improvement from Real-World Experience},
+  author        = {Liao, Ruizhe and Chen, Wenrui and Zeng, Liangji and Lin, Haoran and Yang, Fan and Yang, Kailun and Wang, Yaonan},
+  journal       = {arXiv preprint arXiv:2606.09615},
+  year          = {2026},
+  doi           = {10.48550/arXiv.2606.09615},
+  url           = {https://arxiv.org/abs/2606.09615},
+  eprint        = {2606.09615},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO}
 }
 ```
 
+## License
+
+This project is released under the [MIT License](LICENSE).
+
 ## Acknowledgement
 
-We thank the authors of [iDP3 / Humanoid-Teleoperation](https://github.com/YanjieZe/Humanoid-Teleoperation) for their open-source work, which provided valuable reference and inspiration for this project.
+We thank the authors of [iDP3 / Humanoid-Teleoperation](https://github.com/YanjieZe/Humanoid-Teleoperation) and [RealtimeVLA v2](https://dexmal.github.io/realtime-vla-v2/) for their open-source work, which provided valuable reference and inspiration for this project.

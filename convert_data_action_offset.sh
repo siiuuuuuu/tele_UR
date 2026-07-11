@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Convert task3 H5 demos to Zarr with future action-label offsets.
+# Convert regular H5 demonstrations to Zarr with future action-label offsets.
 #
 # Usage:
 #   bash convert_data_action_offset.sh        # converts offsets +1 +2 +3
@@ -28,6 +28,7 @@ for action_offset_frames in "${offsets[@]}"; do
   python convert_demos.py \
     --demo_dir "${demo_dir}" \
     --save_dir "${save_dir}" \
+    --overwrite \
     --save_img "${save_img}" \
     --save_wrist_img "${save_wrist_img}" \
     --save_depth "${save_depth}" \

@@ -32,6 +32,28 @@ def report_ignored_raw_only_keys(h5_data, file_name):
         )
 
 
+def read_recorded_action_offset_frames(h5_data, override=None):
+    if override is not None:
+        return float(override)
+
+    value = h5_data.attrs.get("action_alignment_offset_frames", 0.0)
+    return float(np.asarray(value).item())
+
+
+def common_recorded_action_offset(offset_values):
+    if not offset_values:
+        return 0.0
+
+    first = float(offset_values[0])
+    for value in offset_values[1:]:
+        if not np.isclose(float(value), first, rtol=0.0, atol=1e-6):
+            raise ValueError(
+                "mixed recorded action offsets in one zarr conversion: "
+                f"{offset_values}"
+            )
+    return first
+
+
 def validate_training_zarr_schema(zarr_data, zarr_meta):
     data_keys = set(zarr_data.keys())
     meta_keys = set(zarr_meta.keys())
@@ -142,6 +164,11 @@ def convert_dataset(args):
     demo_dirs = parse_demo_dirs(args)
     save_dir = args.save_dir
 
+    action_offset_frames = int(args.action_offset_frames)
+    if action_offset_frames < 0:
+        raise ValueError("--action_offset_frames must be >= 0")
+    recorded_action_offset_override = args.recorded_action_offset_frames
+
     save_img = bool(args.save_img)
     save_wrist_img = bool(args.save_wrist_img)
     save_depth = bool(args.save_depth)
@@ -150,20 +177,15 @@ def convert_dataset(args):
 
     # create dir to save demonstrations
     if os.path.exists(save_dir):
-        cprint('Data already exists at {}'.format(save_dir), 'red')
-        cprint("If you want to overwrite, delete the existing directory first.", "red")
-        cprint("Do you want to overwrite? (y/n)", "red")
-        # user_input = input()
-        user_input = 'y'
-        if user_input == 'y':
-            cprint('Overwriting {}'.format(save_dir), 'red')
-            if os.path.isdir(save_dir):
-                shutil.rmtree(save_dir)
-            else:
-                os.remove(save_dir)
+        if not args.overwrite:
+            raise FileExistsError(
+                f"output already exists: {save_dir}; pass --overwrite to replace it"
+            )
+        cprint('Overwriting {}'.format(save_dir), 'red')
+        if os.path.isdir(save_dir):
+            shutil.rmtree(save_dir)
         else:
-            cprint('Exiting', 'red')
-            return
+            os.remove(save_dir)
     os.makedirs(save_dir, exist_ok=True)
 
     zarr_root = zarr.group(save_dir)
@@ -192,6 +214,8 @@ def convert_dataset(args):
 
     total_count = 0
     processed_files = 0
+    skipped_short_episodes = 0
+    recorded_action_offset_values = []
     episode_ends_arrays = []
     success_arrays = []
 
@@ -212,14 +236,21 @@ def convert_dataset(args):
             with h5py.File(file_name, "r") as data:
                 report_ignored_raw_only_keys(data, file_name)
 
+                recorded_action_offset_values.append(
+                    read_recorded_action_offset_frames(
+                        data,
+                        override=recorded_action_offset_override,
+                    )
+                )
+
                 action_array = np.asarray(data["action"][:], dtype=np.float32)
-                length = action_array.shape[0]
+                raw_length = action_array.shape[0]
 
                 state_array = np.asarray(data["env_qpos_proprioception"][:], dtype=np.float32)
-                if state_array.shape[0] != length:
+                if state_array.shape[0] != raw_length:
                     raise ValueError(
                         f"state length mismatch in {file_name}: "
-                        f"action length={length}, state shape={state_array.shape}"
+                        f"action length={raw_length}, state shape={state_array.shape}"
                     )
 
                 if "intervention" in data:
@@ -227,25 +258,29 @@ def convert_dataset(args):
                 else:
                     # H5 缺失 intervention 时，使用命令行指定的默认标签。
                     intervention_array = np.full(
-                        (length,), default_intervention, dtype=bool
+                        (raw_length,), default_intervention, dtype=bool
                     )
 
                 # 统一成 (T,) 的每步干预标记，避免和 action 维度绑定导致后续 stack 失败
                 if intervention_array.ndim == 0:
-                    intervention_array = np.full((length,), bool(intervention_array), dtype=bool)
+                    intervention_array = np.full(
+                        (raw_length,), bool(intervention_array), dtype=bool
+                    )
                 elif intervention_array.ndim > 1:
-                    if intervention_array.shape[0] != length:
+                    if intervention_array.shape[0] != raw_length:
                         raise ValueError(
                             f"intervention first dim mismatch in {file_name}: "
-                            f"action length={length}, intervention shape={intervention_array.shape}"
+                            f"action length={raw_length}, "
+                            f"intervention shape={intervention_array.shape}"
                         )
                     reduction_axes = tuple(range(1, intervention_array.ndim))
                     intervention_array = np.any(intervention_array, axis=reduction_axes)
 
-                if intervention_array.shape[0] != length:
+                if intervention_array.shape[0] != raw_length:
                     raise ValueError(
                         f"intervention length mismatch in {file_name}: "
-                        f"action length={length}, intervention shape={intervention_array.shape}"
+                        f"action length={raw_length}, "
+                        f"intervention shape={intervention_array.shape}"
                     )
 
                 if "success" in data.attrs:
@@ -261,32 +296,62 @@ def convert_dataset(args):
 
                 if save_img:
                     color_array = to_channel_last_uint8(data["color"][:], "color", file_name)
-                    if color_array.shape[0] != length:
+                    if color_array.shape[0] != raw_length:
                         raise ValueError(
                             f"color length mismatch in {file_name}: "
-                            f"action length={length}, color shape={color_array.shape}"
+                            f"action length={raw_length}, color shape={color_array.shape}"
                         )
                 if save_wrist_img:
                     wrist_color_array = to_channel_last_uint8(data["wrist_color"][:], "wrist_color", file_name)
-                    if wrist_color_array.shape[0] != length:
+                    if wrist_color_array.shape[0] != raw_length:
                         raise ValueError(
                             f"wrist_color length mismatch in {file_name}: "
-                            f"action length={length}, wrist_color shape={wrist_color_array.shape}"
+                            f"action length={raw_length}, "
+                            f"wrist_color shape={wrist_color_array.shape}"
                         )
                 if save_depth:
                     depth_array = np.asarray(data["depth"][:], dtype=np.float32)
-                    if depth_array.shape[0] != length:
+                    if depth_array.shape[0] != raw_length:
                         raise ValueError(
                             f"depth length mismatch in {file_name}: "
-                            f"action length={length}, depth shape={depth_array.shape}"
+                            f"action length={raw_length}, depth shape={depth_array.shape}"
                         )
                 if save_cloud:
                     cloud_array = np.asarray(data["cloud"][:], dtype=np.float32)
-                    if cloud_array.shape[0] != length:
+                    if cloud_array.shape[0] != raw_length:
                         raise ValueError(
                             f"cloud length mismatch in {file_name}: "
-                            f"action length={length}, cloud shape={cloud_array.shape}"
+                            f"action length={raw_length}, cloud shape={cloud_array.shape}"
                         )
+
+                length = raw_length - action_offset_frames
+                if length <= 0:
+                    skipped_short_episodes += 1
+                    cprint(
+                        f"skip {file_name}: raw length {raw_length} <= "
+                        f"action offset {action_offset_frames}",
+                        "yellow",
+                    )
+                    continue
+
+                obs_slice = slice(0, length)
+                action_slice = slice(
+                    action_offset_frames,
+                    action_offset_frames + length,
+                )
+                state_array = state_array[obs_slice]
+                action_array = action_array[action_slice]
+                # Intervention describes who produced the action, so it must
+                # stay aligned with the shifted future action label.
+                intervention_array = intervention_array[action_slice]
+                if save_img:
+                    color_array = color_array[obs_slice]
+                if save_wrist_img:
+                    wrist_color_array = wrist_color_array[obs_slice]
+                if save_depth:
+                    depth_array = depth_array[obs_slice]
+                if save_cloud:
+                    cloud_array = cloud_array[obs_slice]
 
             if save_img and img_ds is None:
                 img_ds = create_stream_dataset(zarr_data, 'img', color_array, single_size, 'uint8', compressor)
@@ -338,6 +403,27 @@ def convert_dataset(args):
         )
     success_arrays = np.asarray(success_arrays, dtype=bool)
 
+    recorded_action_offset_frames = common_recorded_action_offset(
+        recorded_action_offset_values
+    )
+    effective_action_offset_frames = (
+        recorded_action_offset_frames + action_offset_frames
+    )
+    if np.isclose(
+        effective_action_offset_frames,
+        round(effective_action_offset_frames),
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        action_offset_attr = int(round(effective_action_offset_frames))
+    else:
+        action_offset_attr = float(effective_action_offset_frames)
+    zarr_root.attrs["action_offset_frames"] = action_offset_attr
+    zarr_root.attrs["recorded_action_offset_frames"] = float(
+        recorded_action_offset_frames
+    )
+    zarr_root.attrs["action_index_offset_frames"] = int(action_offset_frames)
+
     zarr_meta.create_dataset('episode_ends', data=episode_ends_arrays, dtype='int64', overwrite=True, compressor=compressor)
     zarr_meta.create_dataset('success', data=success_arrays, dtype='bool', overwrite=True, compressor=compressor)
     validate_training_zarr_schema(zarr_data, zarr_meta)
@@ -363,6 +449,14 @@ def convert_dataset(args):
     cprint(f'state shape: {state_ds.shape}, range: [{state_min}, {state_max}]', 'green')
     cprint(f'action shape: {action_ds.shape}, range: [{action_min}, {action_max}]', 'green')
     cprint(f'intervention shape: {intervention_ds.shape}', 'green')
+    cprint(
+        f'action offset frames: +{effective_action_offset_frames:g} '
+        f'(recorded +{recorded_action_offset_frames:g}, '
+        f'index +{action_offset_frames})',
+        'green',
+    )
+    if skipped_short_episodes:
+        cprint(f'skipped short episodes: {skipped_short_episodes}', 'yellow')
     cprint(f'Saved zarr file to {save_dir}', 'green')
 
     # count file size
@@ -384,8 +478,36 @@ if __name__ == "__main__":
     parser.add_argument("--save_wrist_img", type=int, default=1) # 是否保存手腕相机图像
     parser.add_argument("--save_depth", type=int, default=0)
     parser.add_argument("--save_cloud", type=int, default=0)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace save_dir if it already exists.",
+    )
     parser.add_argument("--default_intervention", type=int, choices=(0, 1), default=0,
                         help="Value for H5 files without intervention: 0=non-intervention, 1=intervention")
+    parser.add_argument(
+        "--action_offset_frames",
+        type=int,
+        default=1,
+        help=(
+            "Additional future action-label offset inside each episode: "
+            "obs/state/image[i] -> action/intervention[i + offset]. The last "
+            "offset frames of every episode are dropped. This is added to any "
+            "action_alignment_offset_frames stored in the source H5 files. "
+            "Default: 1 frame, compensating the measured RealSense image-time "
+            "offset."
+        ),
+    )
+    parser.add_argument(
+        "--recorded_action_offset_frames",
+        type=float,
+        default=None,
+        help=(
+            "Override the H5 action_alignment_offset_frames metadata. Use this "
+            "only for old H5 files whose action-label timing is known but not "
+            "stored in attrs."
+        ),
+    )
 
     args = parser.parse_args()
 

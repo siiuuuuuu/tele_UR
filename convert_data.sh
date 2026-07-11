@@ -12,11 +12,15 @@ save_img="1"
 save_wrist_img="1"
 save_depth="0"
 save_cloud="0"
+# Default training label: observation[i] -> action[i + 1].
+action_offset_frames="1"
 
 python convert_demos.py \
   --demo_dir "${demo_dir}" \
   --save_dir "${save_dir}" \
+  --overwrite \
   --save_img "${save_img}" \
   --save_wrist_img "${save_wrist_img}" \
   --save_depth "${save_depth}" \
-  --save_cloud "${save_cloud}"
+  --save_cloud "${save_cloud}" \
+  --action_offset_frames "${action_offset_frames}"
