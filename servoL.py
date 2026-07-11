@@ -33,7 +33,7 @@ DEFAULT_WORKSPACE_X = [-1.5, 1.5]
 DEFAULT_WORKSPACE_Y = [-1.5, 1.5]
 DEFAULT_WORKSPACE_Z = [-0.5, 1.5]
 DEFAULT_INITIAL_POSE = [0.248, 0.1212, 0.3978, 1.16, 1.25, 1.28]
-DEFAULT_DT = 1.0 / 25.0
+DEFAULT_DT = 1.0 / 30.0
 DEFAULT_TRACKER_FREQUENCY = 60.0
 DEFAULT_SERVO_FREQUENCY = 120.0
 DEFAULT_TRACKER_TIMEOUT = 0.25
@@ -52,6 +52,7 @@ DEFAULT_HAND_SMOOTHING_DAMPING = 0.8
 DEFAULT_HAND_INPUT_ALPHA = 0.6
 DEFAULT_ALIGNMENT_TOLERANCE_MS = 25.0
 DEFAULT_HISTORY_WAIT_TIMEOUT_MS = 5.0
+DEFAULT_ACTION_ALIGNMENT_OFFSET_FRAMES = 0
 DEFAULT_FRONT_CAMERA_FPS = 30
 DEFAULT_WRIST_CAMERA_FPS = 60
 DEFAULT_CAMERA_SYNC_WAIT_TIMEOUT_MS = 5
@@ -142,6 +143,9 @@ def main(args):
     # initialize realsense
     front_camera_fps = args.camera_fps or args.front_camera_fps
     wrist_camera_fps = args.camera_fps or args.wrist_camera_fps
+    action_alignment_offset_s = (
+        float(args.action_alignment_offset_frames) / float(front_camera_fps)
+    )
     cam_context=MultiRealSense(use_right_cam=use_wrist_img, front_num_points=20000, 
                          use_grid_sampling=True, use_crop=False,img_size=256,
                          front_camera_fps=front_camera_fps,
@@ -213,6 +217,7 @@ def main(args):
         alignment_tolerance_ms=args.alignment_tolerance_ms,
         timestamp_builder=TimestampBuilder(),
         history_wait_timeout_ms=args.history_wait_timeout_ms,
+        action_alignment_offset_s=action_alignment_offset_s,
     )
     closed_normally = False
 
@@ -229,7 +234,20 @@ def main(args):
                 or not keyboard_control.is_recording()
             ):
                 continue
-            episode = EpisodeBuffer(use_wrist_img=use_wrist_img)
+            episode = EpisodeBuffer(
+                use_wrist_img=use_wrist_img,
+                metadata={
+                    "action_alignment_policy": "front_anchor_plus_offset_frames",
+                    "action_alignment_offset_frames": float(
+                        args.action_alignment_offset_frames
+                    ),
+                    "action_alignment_offset_seconds": float(
+                        action_alignment_offset_s
+                    ),
+                    "front_camera_fps": float(front_camera_fps),
+                    "wrist_camera_fps": float(wrist_camera_fps),
+                },
+            )
             runtime.start_episode_workers()
             sample_provider.reset_episode()
             episode_start_ns = time.monotonic_ns()
@@ -257,6 +275,11 @@ def main(args):
             print(
                 "History wait timeout set to: "
                 f"{args.history_wait_timeout_ms:.2f} ms\r"
+            )
+            print(
+                "Action alignment offset set to: "
+                f"+{args.action_alignment_offset_frames:.3f} front frame(s) "
+                f"({action_alignment_offset_s * 1000.0:.2f} ms)\r"
             )
             print(
                 "Hand smoother set to: "
@@ -408,6 +431,16 @@ if __name__ == '__main__':
     parser.add_argument("--hand_input_alpha", type=positive_float, default=DEFAULT_HAND_INPUT_ALPHA)
     parser.add_argument("--alignment_tolerance_ms", type=positive_float, default=DEFAULT_ALIGNMENT_TOLERANCE_MS)
     parser.add_argument("--history_wait_timeout_ms", type=nonnegative_float, default=DEFAULT_HISTORY_WAIT_TIMEOUT_MS)
+    parser.add_argument(
+        "--action_alignment_offset_frames",
+        type=nonnegative_float,
+        default=DEFAULT_ACTION_ALIGNMENT_OFFSET_FRAMES,
+        help=(
+            "Record actions nearest to front_camera_anchor + this many front "
+            "camera frames while observations stay aligned to the anchor. "
+            "Use 0 for the legacy anchor-time action labels."
+        ),
+    )
     parser.add_argument("--front_camera_fps", type=positive_int, default=DEFAULT_FRONT_CAMERA_FPS)
     parser.add_argument("--wrist_camera_fps", type=positive_int, default=DEFAULT_WRIST_CAMERA_FPS)
     parser.add_argument("--camera_fps", type=positive_int, default=None,

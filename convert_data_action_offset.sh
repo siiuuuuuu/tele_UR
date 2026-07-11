@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-demo_dir="${HOME}/dp_data/task3_demo"
+demo_dir="${HOME}/dp_data/task4_demo"
 
 # Use 1 to include an observation type in Zarr, or 0 to skip it.
 save_img="1"
@@ -23,7 +23,7 @@ else
 fi
 
 for action_offset_frames in "${offsets[@]}"; do
-  save_dir="${HOME}/dp_data/test_zarr_task3_action_t_plus_${action_offset_frames}"
+  save_dir="${HOME}/dp_data/test_zarr_task4_action_t_plus_${action_offset_frames}"
 
   python convert_demos.py \
     --demo_dir "${demo_dir}" \

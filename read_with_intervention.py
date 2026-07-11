@@ -11,8 +11,8 @@ import read as dual_viewer
 
 
 WINDOW_NAME = "H5 Intervention Viewer"
-DEFAULT_FPS = 25.0
-DEFAULT_DATA_FOLDER = os.path.expanduser("~/dp_data/offlineRL_data/test_task1_iter1")
+DEFAULT_FPS = 30.0
+DEFAULT_DATA_FOLDER = os.path.expanduser("~/dp_data/offlineRL_data/test_task4_iter1")
 
 TRUE_WORDS = {"1", "true", "t", "yes", "y", "success", "ok"}
 FALSE_WORDS = {"0", "false", "f", "no", "n", "fail", "failed"}

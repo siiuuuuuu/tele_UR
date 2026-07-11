@@ -3,17 +3,17 @@
 
 
 # Edit these settings before collecting data.
-demo_dir="${HOME}/dp_data/task3_demo"
+demo_dir="${HOME}/dp_data/task4_demo"
 ur_host="192.168.3.6"
 workspace_x=(-1.5 1.5)
 workspace_y=(-1.5 1.5)
 workspace_z=(-0.5 1.5)
 initial_pose=(0.248 0.1212 0.3978 1.16 1.25 1.28)
-dt="0.04"
+dt="0.0333"
 tracker_frequency="80"
 servo_frequency="120"
 tracker_timeout="0.25"
-interpolation_delay="0.008"
+interpolation_delay="0.0125"
 hand_frequency="120"
 robot_state_frequency="125"
 manus_timeout="0.25"

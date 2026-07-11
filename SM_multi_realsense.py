@@ -152,49 +152,6 @@ class CameraInfo:
         self.scale = scale
 
 
-class SensorTimestampMapper:
-    """Rolling affine map from SENSOR_TIMESTAMP_us to host monotonic_ns."""
-
-    def __init__(self, window_size=180, min_samples=8):
-        self.window_size = int(window_size)
-        self.min_samples = int(min_samples)
-        self.samples = []
-        self.slope_ns_per_us = 1000.0
-        self.intercept_ns = None
-
-    def map(self, sensor_timestamp_us, frame_global_mono_ns):
-        if sensor_timestamp_us is None or frame_global_mono_ns is None:
-            return None, float("nan")
-
-        sample = (float(sensor_timestamp_us), float(frame_global_mono_ns))
-        self.samples.append(sample)
-        if len(self.samples) > self.window_size:
-            self.samples = self.samples[-self.window_size :]
-
-        if len(self.samples) >= self.min_samples:
-            self._fit()
-
-        if self.intercept_ns is None:
-            mapped_ns = int(round(frame_global_mono_ns))
-            residual_ms = 0.0
-        else:
-            mapped = self.slope_ns_per_us * float(sensor_timestamp_us) + self.intercept_ns
-            mapped_ns = int(round(mapped))
-            residual_ms = (float(frame_global_mono_ns) - mapped) / 1e6
-        return mapped_ns, residual_ms
-
-    def _fit(self):
-        x0 = self.samples[0][0]
-        y0 = self.samples[0][1]
-        x = np.asarray([sample[0] - x0 for sample in self.samples], dtype=np.float64)
-        y = np.asarray([sample[1] - y0 for sample in self.samples], dtype=np.float64)
-        if np.all(x == x[0]):
-            return
-        slope, intercept_rel = np.polyfit(x, y, 1)
-        self.slope_ns_per_us = float(slope)
-        self.intercept_ns = float(y0 + intercept_rel - slope * x0)
-
-
 # -------- Shared-memory ring buffer --------
 def _attach_shm(name):
     # Python 3.13+ supports track=..., older versions do not.
@@ -608,7 +565,6 @@ class SingleVisionProcess(mp.Process):
 
     def run(self):
         ring = SharedFrameRingAccessor(self.ring_desc)
-        timestamp_mapper = SensorTimestampMapper()
 
         self.pipeline, self.align, self.depth_scale, self.camera_info = init_given_realsense_D415(
             self.device,
@@ -625,16 +581,12 @@ class SingleVisionProcess(mp.Process):
                 t_receive_host_ns = int(timestamp_info["wait_return_mono_ns"])
                 sensor_timestamp_us = timestamp_info["sensor_timestamp_us"]
                 frame_global_mono_ns = timestamp_info["frame_global_mono_ns"]
-                t_host_ns, fit_residual_ms = timestamp_mapper.map(
-                    sensor_timestamp_us,
-                    frame_global_mono_ns,
+                t_host_ns = (
+                    int(frame_global_mono_ns)
+                    if frame_global_mono_ns is not None
+                    else t_receive_host_ns
                 )
-                if t_host_ns is None:
-                    t_host_ns = (
-                        int(frame_global_mono_ns)
-                        if frame_global_mono_ns is not None
-                        else t_receive_host_ns
-                    )
+                fit_residual_ms = float("nan")
                 receive_minus_image_ms = (t_receive_host_ns - int(t_host_ns)) / 1e6
                 ring.publish(
                     frame=color_frame,

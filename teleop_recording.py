@@ -33,6 +33,7 @@ class AlignedInputs:
     record_start_ns: int
     t_camera_read_ns: int
     t_anchor_ns: int
+    t_action_anchor_ns: int
     t_arm_read_ns: int
     t_hand_read_ns: int
     cam_dict: dict
@@ -48,6 +49,9 @@ class AlignedInputs:
     robot_sync_delta_ms: float
     hand_sync_delta_ms: float
     wrist_sync_delta_ms: float
+    action_anchor_offset_ms: float
+    arm_action_obs_delta_ms: float
+    hand_action_obs_delta_ms: float
 
 
 @dataclass
@@ -63,6 +67,7 @@ class TimestampBuilder:
         timestamps = {
             "t_record_start_ns": aligned.record_start_ns,
             "t_anchor_ns": aligned.t_anchor_ns,
+            "t_action_anchor_ns": aligned.t_action_anchor_ns,
             "t_arm_read_ns": aligned.t_arm_read_ns,
             "t_arm_action_host_ns": aligned.t_arm_action_ns,
             "t_arm_servo_host_ns": scalar_int(
@@ -135,10 +140,14 @@ class TimestampBuilder:
             "t_aligned_arm_action_ns": aligned.t_arm_action_ns,
             "t_aligned_robot_obs_ns": aligned.t_robot_obs_host_ns,
             "t_aligned_hand_action_ns": aligned.t_hand_action_ns,
+            "t_aligned_action_anchor_ns": aligned.t_action_anchor_ns,
+            "action_anchor_offset_ms": aligned.action_anchor_offset_ms,
             "sync_delta_arm_action_ms": aligned.arm_sync_delta_ms,
             "sync_delta_robot_obs_ms": aligned.robot_sync_delta_ms,
             "sync_delta_hand_action_ms": aligned.hand_sync_delta_ms,
             "sync_delta_wrist_camera_ms": aligned.wrist_sync_delta_ms,
+            "sync_delta_arm_action_to_obs_ms": aligned.arm_action_obs_delta_ms,
+            "sync_delta_hand_action_to_obs_ms": aligned.hand_action_obs_delta_ms,
         }
         timestamps["t_record_end_ns"] = time.monotonic_ns()
         return timestamps
@@ -160,6 +169,7 @@ class AlignedSampleProvider:
         camera_frame_timeout_ms=None,
         history_wait_timeout_ms=5.0,
         history_wait_sleep_s=0.0005,
+        action_alignment_offset_s=0.0,
     ):
         self.camera = camera
         self.arm_controller = arm_controller
@@ -172,6 +182,9 @@ class AlignedSampleProvider:
         self.camera_frame_timeout_ms = camera_frame_timeout_ms
         self.history_wait_timeout_ms = max(0.0, float(history_wait_timeout_ms))
         self.history_wait_sleep_s = max(0.0, float(history_wait_sleep_s))
+        self.action_alignment_offset_ns = int(
+            round(max(0.0, float(action_alignment_offset_s)) * 1e9)
+        )
         self.wrist_stale_warning_interval_ns = int(
             wrist_stale_warning_interval_s * 1e9
         )
@@ -202,10 +215,12 @@ class AlignedSampleProvider:
         t_anchor_ns = front_meta.get("t_host_ns")
         if t_anchor_ns is None or t_anchor_ns < episode_start_ns:
             return None
+        t_anchor_ns = int(t_anchor_ns)
+        t_action_anchor_ns = t_anchor_ns + self.action_alignment_offset_ns
 
-        self._wait_histories_cover_anchor(t_anchor_ns)
+        self._wait_histories_cover_targets(t_anchor_ns, t_action_anchor_ns)
 
-        motion = self.arm_controller.motion_at_time_ns(t_anchor_ns)
+        motion = self.arm_controller.motion_at_time_ns(t_action_anchor_ns)
         t_arm_read_ns = time.monotonic_ns()
         if motion is None:
             return None
@@ -214,7 +229,7 @@ class AlignedSampleProvider:
         if robot_obs is None:
             return None
 
-        hand_sample = self.hand_control_worker.command_at_time_ns(t_anchor_ns)
+        hand_sample = self.hand_control_worker.command_at_time_ns(t_action_anchor_ns)
         t_hand_read_ns = time.monotonic_ns()
         if hand_sample is None:
             return None
@@ -222,14 +237,17 @@ class AlignedSampleProvider:
         t_arm_action_ns = scalar_int(motion.get("t_arm_action_host_ns"))
         t_robot_obs_host_ns = scalar_int(robot_obs.get("t_robot_obs_host_ns"))
         t_hand_action_ns = scalar_int(hand_sample.get("t_hand_action_host_ns"))
-        arm_sync_delta_ms = time_delta_ms(t_arm_action_ns, t_anchor_ns)
+        arm_sync_delta_ms = time_delta_ms(t_arm_action_ns, t_action_anchor_ns)
         robot_sync_delta_ms = time_delta_ms(t_robot_obs_host_ns, t_anchor_ns)
-        hand_sync_delta_ms = time_delta_ms(t_hand_action_ns, t_anchor_ns)
+        hand_sync_delta_ms = time_delta_ms(t_hand_action_ns, t_action_anchor_ns)
         wrist_sync_delta_ms = (
             time_delta_ms(wrist_meta.get("t_host_ns"), t_anchor_ns)
             if self.use_wrist_img
             else 0.0
         )
+        action_anchor_offset_ms = time_delta_ms(t_action_anchor_ns, t_anchor_ns)
+        arm_action_obs_delta_ms = time_delta_ms(t_arm_action_ns, t_anchor_ns)
+        hand_action_obs_delta_ms = time_delta_ms(t_hand_action_ns, t_anchor_ns)
 
         if self._wrist_is_stale(wrist_sync_delta_ms):
             return None
@@ -258,6 +276,7 @@ class AlignedSampleProvider:
             record_start_ns=record_start_ns,
             t_camera_read_ns=t_camera_read_ns,
             t_anchor_ns=t_anchor_ns,
+            t_action_anchor_ns=t_action_anchor_ns,
             t_arm_read_ns=t_arm_read_ns,
             t_hand_read_ns=t_hand_read_ns,
             cam_dict=cam_dict,
@@ -273,6 +292,9 @@ class AlignedSampleProvider:
             robot_sync_delta_ms=robot_sync_delta_ms,
             hand_sync_delta_ms=hand_sync_delta_ms,
             wrist_sync_delta_ms=wrist_sync_delta_ms,
+            action_anchor_offset_ms=action_anchor_offset_ms,
+            arm_action_obs_delta_ms=arm_action_obs_delta_ms,
+            hand_action_obs_delta_ms=hand_action_obs_delta_ms,
         )
         return AlignedSample(
             robot_state=robot_obs["state"],
@@ -330,29 +352,30 @@ class AlignedSampleProvider:
             )
             self.last_front_skip_warn_ns = now_ns
 
-    def _wait_histories_cover_anchor(self, t_anchor_ns):
+    def _wait_histories_cover_targets(self, t_anchor_ns, t_action_anchor_ns):
         if self.history_wait_timeout_ms <= 0.0:
             return False
 
         t_anchor_ns = int(t_anchor_ns)
+        t_action_anchor_ns = int(t_action_anchor_ns)
         deadline_ns = time.monotonic_ns() + int(
             self.history_wait_timeout_ms * 1e6
         )
         while time.monotonic_ns() < deadline_ns:
-            if self._histories_cover_anchor(t_anchor_ns):
+            if self._histories_cover_targets(t_anchor_ns, t_action_anchor_ns):
                 return True
             time.sleep(self.history_wait_sleep_s)
 
-        return self._histories_cover_anchor(t_anchor_ns)
+        return self._histories_cover_targets(t_anchor_ns, t_action_anchor_ns)
 
-    def _histories_cover_anchor(self, t_anchor_ns):
+    def _histories_cover_targets(self, t_anchor_ns, t_action_anchor_ns):
         arm_time_ns = self.arm_controller.latest_action_time_ns()
         robot_time_ns = self.robot_state_reader.latest_obs_time_ns()
         hand_time_ns = self.hand_control_worker.latest_command_time_ns()
         return (
-            self._covers_anchor(arm_time_ns, t_anchor_ns)
+            self._covers_anchor(arm_time_ns, t_action_anchor_ns)
             and self._covers_anchor(robot_time_ns, t_anchor_ns)
-            and self._covers_anchor(hand_time_ns, t_anchor_ns)
+            and self._covers_anchor(hand_time_ns, t_action_anchor_ns)
         )
 
     @staticmethod

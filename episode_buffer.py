@@ -7,6 +7,7 @@ TIMESTAMP_INT_KEYS = (
     "t_record_start_ns",
     "t_record_end_ns",
     "t_anchor_ns",
+    "t_action_anchor_ns",
     "t_arm_read_ns",
     "t_arm_action_host_ns",
     "t_arm_servo_host_ns",
@@ -34,6 +35,7 @@ TIMESTAMP_INT_KEYS = (
     "t_aligned_arm_action_ns",
     "t_aligned_robot_obs_ns",
     "t_aligned_hand_action_ns",
+    "t_aligned_action_anchor_ns",
 )
 
 TIMESTAMP_FLOAT_KEYS = (
@@ -50,14 +52,18 @@ TIMESTAMP_FLOAT_KEYS = (
     "sync_delta_robot_obs_ms",
     "sync_delta_hand_action_ms",
     "sync_delta_wrist_camera_ms",
+    "action_anchor_offset_ms",
+    "sync_delta_arm_action_to_obs_ms",
+    "sync_delta_hand_action_to_obs_ms",
 )
 
 
 class EpisodeBuffer:
     """Accumulates one teleoperation episode and writes it to HDF5."""
 
-    def __init__(self, use_wrist_img=False):
+    def __init__(self, use_wrist_img=False, metadata=None):
         self.use_wrist_img = use_wrist_img
+        self.metadata = dict(metadata or {})
         self.robot_states = []
         self.front_images = []
         self.wrist_images = []
@@ -102,6 +108,9 @@ class EpisodeBuffer:
 
         arrays = self.to_arrays()
         with h5py.File(record_file_name, "w") as f:
+            for key, value in self.metadata.items():
+                if value is not None:
+                    f.attrs[key] = value
             f.create_dataset("color", data=arrays["color"])
             if self.use_wrist_img:
                 f.create_dataset("wrist_color", data=arrays["wrist_color"])

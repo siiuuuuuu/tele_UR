@@ -48,12 +48,35 @@ def validate_training_zarr_schema(zarr_data, zarr_meta):
         )
 
 
+def read_recorded_action_offset_frames(h5_data, override=None):
+    if override is not None:
+        return float(override)
+
+    value = h5_data.attrs.get("action_alignment_offset_frames", 0.0)
+    return float(np.asarray(value).item())
+
+
+def common_recorded_action_offset(offset_values):
+    if not offset_values:
+        return 0.0
+
+    first = float(offset_values[0])
+    for value in offset_values[1:]:
+        if not np.isclose(float(value), first, rtol=0.0, atol=1e-6):
+            raise ValueError(
+                "mixed recorded action offsets in one zarr conversion: "
+                f"{offset_values}"
+            )
+    return first
+
+
 def convert_dataset(args):
     demo_dir = args.demo_dir
     save_dir = args.save_dir
     action_offset_frames = int(args.action_offset_frames)
     if action_offset_frames < 0:
         raise ValueError("--action_offset_frames must be >= 0")
+    recorded_action_offset_override = args.recorded_action_offset_frames
     
     save_img = args.save_img
     save_wrist_img = args.save_wrist_img
@@ -91,6 +114,7 @@ def convert_dataset(args):
     intervention_arrays = []
     
     skipped_short_episodes = 0
+    recorded_action_offset_values = []
 
     for demo_file in demo_files:
         # load file (h5)
@@ -99,6 +123,12 @@ def convert_dataset(args):
 
         with h5py.File(file_name, "r") as data:
             report_ignored_raw_only_keys(data, file_name)
+            recorded_action_offset_values.append(
+                read_recorded_action_offset_frames(
+                    data,
+                    override=recorded_action_offset_override,
+                )
+            )
 
             if save_img:
                 color_array = data["color"][:]
@@ -182,7 +212,26 @@ def convert_dataset(args):
     ###############################
     # create zarr file
     zarr_root = zarr.group(save_dir)
-    zarr_root.attrs["action_offset_frames"] = action_offset_frames
+    recorded_action_offset_frames = common_recorded_action_offset(
+        recorded_action_offset_values
+    )
+    effective_action_offset_frames = (
+        recorded_action_offset_frames + action_offset_frames
+    )
+    if np.isclose(
+        effective_action_offset_frames,
+        round(effective_action_offset_frames),
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        action_offset_attr = int(round(effective_action_offset_frames))
+    else:
+        action_offset_attr = float(effective_action_offset_frames)
+    zarr_root.attrs["action_offset_frames"] = action_offset_attr
+    zarr_root.attrs["recorded_action_offset_frames"] = float(
+        recorded_action_offset_frames
+    )
+    zarr_root.attrs["action_index_offset_frames"] = int(action_offset_frames)
     zarr_data = zarr_root.create_group('data')
     zarr_meta = zarr_root.create_group('meta')
     # save img, state, action arrays into data, and episode ends arrays into meta
@@ -233,7 +282,12 @@ def convert_dataset(args):
     validate_training_zarr_schema(zarr_data, zarr_meta)
     #包含每个episode结束时的全局索引，用于区分不同episode
     cprint(f'episode nums: {episode_ends_arrays.shape}', 'green')
-    cprint(f'action offset frames: +{action_offset_frames}', 'green')
+    cprint(
+        f'action offset frames: +{effective_action_offset_frames:g} '
+        f'(recorded +{recorded_action_offset_frames:g}, '
+        f'index +{action_offset_frames})',
+        'green',
+    )
     if skipped_short_episodes:
         cprint(f'skipped short episodes: {skipped_short_episodes}', 'yellow')
 
@@ -270,8 +324,20 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help=(
-            "Use future action labels inside each episode: obs/state/image[i] -> "
-            "action[i + offset]. The last offset frames of each episode are dropped."
+            "Additional conversion-time future action labels inside each episode: "
+            "obs/state/image[i] -> action[i + offset]. The last offset frames "
+            "of each episode are dropped. This is added to any recorded "
+            "action_alignment_offset_frames stored in the source H5 files."
+        ),
+    )
+    parser.add_argument(
+        "--recorded_action_offset_frames",
+        type=float,
+        default=None,
+        help=(
+            "Override the H5 action_alignment_offset_frames metadata. Use this "
+            "only for old H5 files whose action-label timing is known but not "
+            "stored in attrs."
         ),
     )
     
