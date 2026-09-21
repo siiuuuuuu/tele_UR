@@ -2,12 +2,13 @@
 #bash convert_data.sh
 
 # Edit these settings before converting regular teleoperation data.
-# Source H5 files may contain a raw-only "timestamps" group; training Zarr
-# intentionally drops it and keeps only image/state/action/meta fields.
-demo_dir="${HOME}/dp_data/task4_demo"
+# Source H5 files may contain a raw-only "timestamps" group; the training
+# Zarr+memmap dataset intentionally drops it.
+demo_dir="${HOME}/dp_data/task3_test_demo"
 # This directory is overwritten if it already exists.
-save_dir="${HOME}/dp_data/test_zarr_task4"
-# Use 1 to include an observation type in Zarr, or 0 to skip it.
+save_dir="${HOME}/dp_data/zarr_task3_test"
+# Use 1 to include an observation type, or 0 to skip it. Visual arrays are
+# written as NPY memmaps; state/action/meta remain in data.zarr.
 save_img="1"
 save_wrist_img="1"
 save_depth="0"

@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-
+#bash convert_rollout_data.sh
 # Edit these settings before merging and converting rollout/demo data.
-# Source H5 files may contain a raw-only "timestamps" group; training Zarr
-# intentionally drops it and keeps only image/state/action/intervention/meta fields.
+# Source H5 files may contain a raw-only "timestamps" group; the training
+# Zarr+memmap dataset intentionally drops it.
 demo_dirs=(
-  "${HOME}/dp_data/task1_expertdata"
-  "${HOME}/dp_data/task1_rollout"
+  #"${HOME}/dp_data/task2_expertdata"
+  #"${HOME}/dp_data/second_task3_expertdata"
+  #"${HOME}/dp_data/offlineRL_data/second_task3_iter1"
+  #"${HOME}/dp_data/offlineRL_data/second_task3_iter2"
+  "${HOME}/dp_data/offlineRL_data/task2_testset"
+
 )
 # This directory is overwritten if it already exists.
-save_dir="${HOME}/dp_data/task1_Recap_iter2"
-# Use 1 to include an observation type in Zarr, or 0 to skip it.
+save_dir="${HOME}/dp_data/test_task2_dataset"
+# Use 1 to include an observation type, or 0 to skip it. Visual arrays are
+# written as NPY memmaps; state/action/intervention/meta remain in data.zarr.
 save_img="1"
 save_wrist_img="1"
 save_depth="0"

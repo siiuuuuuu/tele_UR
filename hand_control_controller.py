@@ -13,9 +13,9 @@ class JointSmoother:
     def __init__(
         self,
         joint_count=6,
-        natural_frequency=25.0,
-        damping_ratio=0.8,
-        input_alpha=0.6,
+        natural_frequency=30.0,
+        damping_ratio=0.85,
+        input_alpha=0.84,
         minimum=0.0,
         maximum=1000.0,
     ):
@@ -95,9 +95,9 @@ class HighRateHandController:
         hand_controller,
         control_frequency=120.0,
         manus_timeout=0.25,
-        smoothing_natural_frequency=25.0,
-        smoothing_damping_ratio=0.8,
-        smoothing_input_alpha=0.6,
+        smoothing_natural_frequency=30.0,
+        smoothing_damping_ratio=0.85,
+        smoothing_input_alpha=0.84,
         command_history_size=128,
     ):
         self.manus_source = manus_source

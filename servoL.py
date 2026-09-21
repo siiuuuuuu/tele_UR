@@ -47,9 +47,9 @@ DEFAULT_MANUS_ZMQ_CONFLATE = True
 DEFAULT_MANUS_ZMQ_POLL_TIMEOUT_MS = 100
 DEFAULT_MANUS_CONTROL_THRESHOLD = 10.0
 DEFAULT_MANUS_SCALE_FACTOR = 15.0
-DEFAULT_HAND_SMOOTHING_OMEGA = 25.0
-DEFAULT_HAND_SMOOTHING_DAMPING = 0.8
-DEFAULT_HAND_INPUT_ALPHA = 0.6
+DEFAULT_HAND_SMOOTHING_OMEGA = 30.0
+DEFAULT_HAND_SMOOTHING_DAMPING = 0.85
+DEFAULT_HAND_INPUT_ALPHA = 0.84
 DEFAULT_ALIGNMENT_TOLERANCE_MS = 25.0
 DEFAULT_HISTORY_WAIT_TIMEOUT_MS = 5.0
 DEFAULT_ACTION_ALIGNMENT_OFFSET_FRAMES = 0
@@ -318,8 +318,12 @@ def main(args):
 
             # Save the episode data
             if len(episode)>0:
-                user_choice = input("Save recorded data? (y/n): ").lower().strip()
-                if user_choice=='y':
+                user_input = input("Save recorded data? (y/n): ").lower().strip()
+                user_choice = next(
+                    (char for char in reversed(user_input) if char in ("y", "n")),
+                    None,
+                )
+                if user_choice == "y":
                     record_file_name = os.path.join(data_dir, datetime.now().strftime("demo_%Y%m%d_%H%M%S")+".h5")
                     print("Data recording")
                     summary = episode.save_h5(record_file_name)    

@@ -2,8 +2,8 @@
 #bash collect_data.sh
 
 
-# Edit these settings before collecting data.
-demo_dir="${HOME}/dp_data/task4_demo"
+# Edit these settings before collectin data.
+demo_dir="${HOME}/dp_data/task3"
 ur_host="192.168.3.6"
 workspace_x=(-1.5 1.5)
 workspace_y=(-1.5 1.5)
@@ -34,7 +34,7 @@ action_alignment_offset_frames="0"
 front_camera_fps="30"
 wrist_camera_fps="60"
 camera_sync_wait_timeout_ms="5"
-max_length="1000"
+max_length="2000"
 hand_port="/dev/ttyUSB0"
 hand_baudrate="115200"
 use_wrist_img="true"

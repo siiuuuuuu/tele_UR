@@ -121,7 +121,7 @@ Each recorded sample uses the front-camera image timestamp as `t_anchor`:
 The default collection-time `action_alignment_offset_frames` is `0`, so raw
 HDF5 files retain actions nearest to the same front-camera anchor. The
 additional one-frame compensation used for training is applied during HDF5 to
-Zarr conversion, as described in Section 6.
+Zarr+memmap conversion, as described in Section 6.
 
 ## 4. Collect Demonstrations
 
@@ -207,7 +207,7 @@ one-frame offset as an empirical training-label compensation, not a precise
 hardware exposure calibration. Re-run the measurement after changing the
 camera model, resolution, frame rate, exposure mode, or display setup.
 
-## 6. Convert HDF5 to Zarr
+## 6. Convert HDF5 to Zarr+memmap
 
 For regular teleoperation data, edit the input directory, output directory, and saved observation types at the top of `convert_data.sh`. Then run:
 
@@ -220,6 +220,24 @@ For data with `success` / `intervention` metadata, or when merging multiple dire
 ```bash
 bash convert_rollout_data.sh
 ```
+
+Both converters write the large-dataset layout used by DexPIE directly; they
+do not create the legacy all-Zarr dataset first:
+
+```text
+save_dir/
+├── data.zarr/
+│   ├── data/        # state, action, optional intervention/cloud
+│   └── meta/        # episode_ends, success
+├── img.npy          # present when save_img=1
+├── wrist_img.npy    # present when save_wrist_img=1
+└── depth.npy        # present when save_depth=1
+```
+
+The visual `.npy` files are NumPy memmaps, while smaller/nonvisual arrays stay
+in `data.zarr`. Conversion scans H5 metadata first and then copies frames in
+batches, so it does not accumulate the complete image dataset in RAM. Use
+`--batch_size` to change the default batch size of 64 frames.
 
 Training conversion defaults to a one-frame future action label:
 
@@ -238,9 +256,9 @@ There are two distinct offsets:
 | Offset | Applied at | Default | Meaning |
 | --- | --- | ---: | --- |
 | `action_alignment_offset_frames` | HDF5 collection | 0 | Select control history relative to the front-camera anchor |
-| `action_offset_frames` | Zarr conversion | 1 | Shift the training action/intervention index into the future |
+| `action_offset_frames` | Dataset conversion | 1 | Shift the training action/intervention index into the future |
 
-The Zarr root stores `recorded_action_offset_frames`,
+The `data.zarr` root stores `recorded_action_offset_frames`,
 `action_index_offset_frames`, and their sum as `action_offset_frames`. Source
 HDF5 files with different recorded offsets cannot be merged without an
 explicit override.
@@ -260,8 +278,8 @@ bash convert_rollout_data_action_offset.sh 2
 ```
 
 The raw HDF5 `timestamps/` diagnostics are intentionally not copied into the
-training Zarr. Regular demonstration conversion marks all episodes successful;
-rollout conversion reads `success` and `intervention` when present.
+training dataset. Regular demonstration conversion marks all episodes
+successful; rollout conversion reads `success` and `intervention` when present.
 
 The provided shell scripts pass `--overwrite` and replace an existing
 `save_dir`. Direct Python invocation refuses to replace an existing output
